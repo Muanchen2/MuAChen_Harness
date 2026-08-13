@@ -293,6 +293,8 @@
     { "path": "./packages/lsp/lsp" },
     { "path": "./packages/lsp/lsp-stdio" },
     { "path": "./packages/lsp/tool-lsp" },
+    { "path": "./packages/memory/dsh-memory" },
+    { "path": "./packages/memory/tool-memory" },
     { "path": "./apps/cli" }
   ]
 }

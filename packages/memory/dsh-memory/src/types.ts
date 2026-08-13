@@ -1,0 +1,58 @@
+/**
+ * Rin memory data model.
+ *
+ * A memory node is one addressable record of project experience — something
+ * that happened, a conclusion reached, the current state of a position, a
+ * lesson learned — stored separately from skills (methods). Unlike a skill, a
+ * memory node carries a parent (so memories form a tree: a domain, its
+ * sub-branches, and shared subtrees) and an append-only change timeline backed
+ * by git commits, so edits are recorded and revertable.
+ *
+ * @module @deepseek-ai/dsh-memory/types
+ */
+
+/**
+ * One memory node.
+ * @param id - stable identity within its store; used as the addressable name.
+ * @param title - short human-facing title for the memory entry.
+ * @param content - the memory body; how much the agent should retain.
+ * @param scope - which store owns it: the workspace store or the central (global) store.
+ * @param branch - the git-style branch (a strategy variant or sub-branch) this node lives on.
+ */
+export interface MemoryNode {
+  readonly id: string
+  readonly title: string
+  readonly content: string
+  readonly scope: MemoryScope
+  readonly branch: string
+}
+
+/**
+ * Which store a memory lives in.
+ * `workspace` is the per-workspace store (project experience); `central` is the
+ * cross-project store (shared reusable knowledge such as tool paths).
+ */
+export type MemoryScope = 'workspace' | 'central'
+
+/**
+ * One entry in a memory node's change timeline.
+ * @param at - commit time, ISO 8601.
+ * @param action - what changed.
+ * @param title - the title after this change, for quick scanning.
+ */
+export interface MemoryTimelineEntry {
+  readonly at: string
+  readonly action: 'created' | 'updated' | 'deleted' | 'relinked'
+  readonly title?: string
+  readonly message: string
+}
+
+/**
+ * The outcome of writing a memory node: the full node plus its new timeline.
+ * @param node - the stored node after the write.
+ * @param timeline - the node's complete change history, newest first.
+ */
+export interface MemoryWriteResult {
+  readonly node: MemoryNode
+  readonly timeline: MemoryTimelineEntry[]
+}
