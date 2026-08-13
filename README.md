@@ -52,6 +52,8 @@ For agents, follow [AGENTS.md](AGENTS.md).
 
 ## License
 
-[MIT](LICENSE)
+Upstream DeepSeek Harness code: [MIT](LICENSE). Original contributions on this
+fork by Muanchen2/Rin (e.g. `packages/memory/`) are GPL-3.0; see
+[YOUR_LICENSE.md](YOUR_LICENSE.md) for the full two-tier licensing statement.
 
 Third-party dependencies and their licenses are disclosed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
