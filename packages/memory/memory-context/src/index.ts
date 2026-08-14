@@ -149,8 +149,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     const catalogue = renderBounded(sections, maxBytes)
     if (catalogue === '') return undefined
     // Unfinished handoff memos deserve explicit attention: the session should
-    // pick the task up instead of waiting to be told.
-    const handoffs = sections.flatMap(section => section.nodes.filter(node => node.id.startsWith('handoff/')))
+    // pick the task up instead of waiting to be told. A handoff whose title
+    // marks it complete ("已完成") is no longer a pickup candidate.
+    const handoffs = sections.flatMap(section =>
+      section.nodes.filter(node => node.id.startsWith('handoff/') && !node.title.includes('已完成')))
     const handoffNote = handoffs.length === 0
       ? ''
       : `\n\n⏳ 有 ${handoffs.length} 条未完成任务交接单（handoff/）：${handoffs.map(node => node.id).join('、')}。请用 memory read 读取并衔接继续。`
