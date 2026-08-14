@@ -295,6 +295,7 @@
     { "path": "./packages/lsp/tool-lsp" },
     { "path": "./packages/memory/dsh-memory" },
     { "path": "./packages/memory/tool-memory" },
+    { "path": "./packages/memory/memory-context" },
     { "path": "./apps/cli" }
   ]
 }
