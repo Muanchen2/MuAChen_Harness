@@ -56,4 +56,4 @@ Prefix-stable while the tool definition and guidance section are unchanged.
 
 ## Known Limitations and Deferred Work
 
-- **Memory semantics are flat** — hierarchy, per-node granular timeline, and shared-subtree recall are deferred to the service and not yet surfaced through the tool.
+- **Memory semantics are flat** — hierarchy and shared-subtree recall are deferred to the service and not yet surfaced through the tool. The per-node timeline is live through `memory timeline`.

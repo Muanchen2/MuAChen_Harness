@@ -13,7 +13,7 @@ Skills are methods — how to do something, stable and reusable. Memories are ex
 - `remember(scope, workspace, { id, title, content, message? })` — Write one memory node, committing the change to the store. Returns the node and its new timeline.
 - `read(scope, workspace, id)` — Load a node plus its timeline, or `undefined` when absent.
 - `list(scope, workspace)` — The sorted memory ids in a store.
-- `timeline(scope, workspace, id)` — The node's change history, newest first.
+- `timeline(scope, workspace, id)` — The node's complete per-file change history, newest first. The earliest commit is `created`, later commits `updated`; every entry carries its backing git `revision`, so future revert/diff operations can address it.
 
 ### Scope
 
@@ -49,5 +49,5 @@ No direct prompt effect; the consumer owns any model-facing rendering.
 
 ## Known Limitations and Deferred Work
 
-- **Timeline is per-store, not per-node-granular-per-commit** — the current `timeline()` reads the store's last commit; per-node granular history across many commits is not yet modeled.
 - **Hierarchy is flat** — nodes live at the store root; the "branch of a branch" tree and shared subtrees are expressible via git branches but not yet surfaced as first-class API.
+- **No revert/diff yet** — timeline entries carry revisions, but `revert` (check out an older revision of a node) and `diff` (show what a revision changed) are not yet exposed as service operations.

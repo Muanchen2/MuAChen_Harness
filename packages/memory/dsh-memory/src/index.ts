@@ -112,6 +112,10 @@ export class MemoryService extends Service {
 
   /**
    * Read a memory node's complete change history, newest first.
+   *
+   * The earliest commit that touched the node's file is `created`; every later
+   * commit is `updated`. Entries carry the backing git revision so future
+   * revert/diff operations can address them.
    * @param scope - which store to read from.
    * @param workspace - workspace path (used only for `scope: 'workspace'`).
    * @param id - the memory node id.
@@ -119,9 +123,13 @@ export class MemoryService extends Service {
    */
   async timeline(scope: MemoryScope, workspace: string | undefined, id: string): Promise<MemoryTimelineEntry[]> {
     const dir = this.storeDir(scope, workspace)
-    const last = await this.git.lastCommit(dir)
-    if (last === undefined) return []
-    return [{ at: last.at, action: 'updated', title: id, message: last.message }]
+    const history = await this.git.logFile(dir, nodePath(id))
+    return history.map((entry, index) => ({
+      revision: entry.revision,
+      at: entry.at,
+      action: index === history.length - 1 ? 'created' : 'updated',
+      message: entry.message,
+    }))
   }
 
   /** Resolve the git store directory for a scope. */

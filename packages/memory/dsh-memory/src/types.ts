@@ -36,11 +36,13 @@ export type MemoryScope = 'workspace' | 'central'
 
 /**
  * One entry in a memory node's change timeline.
+ * @param revision - the git commit hash backing this change; addressable by future revert/diff.
  * @param at - commit time, ISO 8601.
  * @param action - what changed.
  * @param title - the title after this change, for quick scanning.
  */
 export interface MemoryTimelineEntry {
+  readonly revision: string
   readonly at: string
   readonly action: 'created' | 'updated' | 'deleted' | 'relinked'
   readonly title?: string

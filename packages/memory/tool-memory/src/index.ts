@@ -105,7 +105,7 @@ async function renderMemory(
       const timeline = await memories.timeline(scope, workspace, args.id)
       return timeline.length === 0
         ? `no timeline for memory "${args.id}"`
-        : timeline.map(entry => `${entry.at} ${entry.message}`).join('\n')
+        : timeline.map(entry => `${entry.at} ${entry.action} ${entry.revision} ${entry.message}`).join('\n')
     }
     default:
       return `unknown memory action "${args.action}"`
@@ -115,12 +115,12 @@ async function renderMemory(
 /** Render one memory node plus timeline as compact text for the model. */
 function renderNode(
   node: { id: string; title: string; content: string; scope: string; branch: string },
-  timeline: { at: string; message: string }[],
+  timeline: { at: string; action: string; revision: string; message: string }[],
 ): string {
   const lines = [`## ${node.title}`, '', node.content, '', 'scope:', node.scope, 'branch:', node.branch]
   if (timeline.length > 0) {
     lines.push('', 'timeline:')
-    for (const entry of timeline) lines.push(`- ${entry.at} ${entry.message}`)
+    for (const entry of timeline) lines.push(`- ${entry.at} ${entry.action} ${entry.revision} ${entry.message}`)
   }
   return lines.join('\n')
 }

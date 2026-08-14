@@ -108,6 +108,46 @@ describe('the memory service over a git-backed store', () => {
     expect(found?.timeline.at(0)?.message).toBe('add beta')
   })
 
+  it('returns the complete change history of a node, newest first', async () => {
+    const root = tempRoot('history')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+
+    await memories.remember('workspace', workspace, {
+      id: 'note',
+      title: 'Note',
+      content: 'v1',
+      message: 'create note',
+    })
+    await memories.remember('workspace', workspace, {
+      id: 'note',
+      title: 'Note',
+      content: 'v2',
+      message: 'update to v2',
+    })
+    await memories.remember('workspace', workspace, {
+      id: 'note',
+      title: 'Note',
+      content: 'v3',
+      message: 'update to v3',
+    })
+
+    const timeline = await memories.timeline('workspace', workspace, 'note')
+    expect(timeline).toHaveLength(3)
+    expect(timeline[0]?.action).toBe('updated')
+    expect(timeline[0]?.message).toBe('update to v3')
+    expect(timeline[0]?.revision).toMatch(/^[0-9a-f]{40}$/)
+    expect(timeline[1]?.action).toBe('updated')
+    expect(timeline[1]?.message).toBe('update to v2')
+    expect(timeline[2]?.action).toBe('created')
+    expect(timeline[2]?.message).toBe('create note')
+    // every entry carries a distinct revision
+    const revisions = new Set(timeline.map(entry => entry.revision))
+    expect(revisions.size).toBe(3)
+    // a node never touched has no history
+    expect(await memories.timeline('workspace', workspace, 'absent')).toEqual([])
+  })
+
   it('serves the central store without a workspace path', async () => {
     const root = tempRoot('central')
     const { memories } = await service(join(root, 'central'))

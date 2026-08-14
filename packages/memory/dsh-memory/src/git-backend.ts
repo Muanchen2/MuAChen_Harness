@@ -99,16 +99,31 @@ export class GitBackend {
   }
 
   /**
-   * Read the last commit message and date on the current branch, when any.
+   * Read the full change history of one store-relative file, newest first.
+   *
+   * The format uses NUL as the field separator (`%H%x00%cI%x00%s%x00`) so a
+   * commit message containing newlines cannot break record parsing; each
+   * commit contributes exactly three fields: hash, ISO-8601 commit date,
+   * subject.
    * @param dir - the memory store directory.
-   * @returns `{ message, at }` or undefined.
+   * @param relPath - store-relative path to trace.
+   * @returns one entry per commit that touched the file, newest first; empty
+   *   when the file has no history.
    */
-  async lastCommit(dir: string): Promise<{ message: string; at: string } | undefined> {
-    const result = await this.git(dir, ['log', '-1', '--format=%s%n%cI', 'HEAD'])
-    if (result.code !== 0 || result.stdout.trim() === '') return undefined
-    const [message, at] = result.stdout.trim().split('\n')
-    if (message === undefined) return undefined
-    return { message, at: at ?? new Date(0).toISOString() }
+  async logFile(dir: string, relPath: string): Promise<Array<{ revision: string; at: string; message: string }>> {
+    const result = await this.git(dir, ['log', '--format=%H%x00%cI%x00%s%x00', '--', relPath])
+    if (result.code !== 0 || result.stdout === '') return []
+    const fields = result.stdout.split('\0')
+    const entries: Array<{ revision: string; at: string; message: string }> = []
+    for (let index = 0; index + 2 < fields.length; index += 3) {
+      const revision = fields[index]
+      const at = fields[index + 1]
+      const message = fields[index + 2]
+      if (revision !== undefined && at !== undefined && message !== undefined) {
+        entries.push({ revision, at, message })
+      }
+    }
+    return entries
   }
 
   /** Run one confined git command in `dir`, collecting bounded stdout and stderr. */
