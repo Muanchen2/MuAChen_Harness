@@ -15,6 +15,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
+import { join } from 'node:path'
 
 /** Buffer cap for collected git output — commit/log output is small. */
 const MAX_OUTPUT_BYTES = 64 * 1024
@@ -39,17 +41,22 @@ export class GitBackend {
   constructor(private readonly ctx: Context) {}
 
   /**
-   * Ensure a directory exists as a git repository, initializing it if needed.
+   * Ensure a directory exists as its own git repository, initializing it if
+   * needed. The store must own its repository: probing "am I inside a work
+   * tree" would answer true for a store nested inside an unrelated repository
+   * and silently route every git operation at the outer repo.
    * @param dir - the memory store directory.
-   * @returns the already-collected result of init/revparse, so callers can predicate on it.
    */
   async ensureRepo(dir: string): Promise<void> {
     await this.mkdirRecursive(dir)
-    await this.git(dir, ['rev-parse', '--is-inside-work-tree'])
-      .then((result) => {
-        if (result.code === 0 && result.stdout.trim() === 'true') return
-        return this.git(dir, ['init'])
-      })
+    const fs = await import('node:fs/promises')
+    let owned = false
+    try {
+      owned = (await fs.stat(join(dir, '.git'))).isDirectory()
+    } catch {
+      // no .git yet: the store is not a repository
+    }
+    if (!owned) await this.git(dir, ['init'])
   }
 
   /**
@@ -106,7 +113,8 @@ export class GitBackend {
 
   /** Run one confined git command in `dir`, collecting bounded stdout and stderr. */
   private async git(dir: string, args: readonly string[]): Promise<GitResult> {
-    const subprocess = this.ctx.get('subprocess')
+    const value: unknown = this.ctx.get('subprocess')
+    const subprocess = value as SubprocessRuntime | undefined
     if (subprocess === undefined) {
       throw new Error('memory: the subprocess service is required to run git')
     }

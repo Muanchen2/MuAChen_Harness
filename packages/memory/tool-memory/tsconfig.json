@@ -19,6 +19,9 @@
     },
     {
       "path": "../../memory/dsh-memory"
+    },
+    {
+      "path": "../../runtime-diagnostics/invariants"
     }
   ]
 }

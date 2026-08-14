@@ -8,7 +8,7 @@ const PACKAGE_NAME = '@deepseek-ai/dsh-memory'
 /** Cordis companion plugin name. */
 export const name = 'dsh-memory-invariant'
 /** Service required before the companion can reserve package ownership. */
-export const inject = ['memories']
+export const inject = ['invariants']
 
 /**
  * Validate the memory store-scope contract at runtime and whenever a memory
@@ -31,9 +31,9 @@ function validateScope(ctx: Context, fail: InvariantFailure): void {
 }
 
 /** Install the memory store-scope validation. */
-const install: InvariantInstaller = Object.assign((ctx: Context, fail: InvariantFailure) => {
+const install: InvariantInstaller = (ctx: Context, fail: InvariantFailure) => {
   validateScope(ctx, fail)
-}, { inject: ['memories'] })
+}
 
 /**
  * Register the memory invariant companion.
