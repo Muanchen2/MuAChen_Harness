@@ -4,7 +4,7 @@ Rin memory context injection: the ancestor chain's memories ride the first turn.
 
 ## What this is
 
-The read-side automation half of the Rin memory system. While the `memory` tool (`@deepseek-ai/dsh-tool-memory`) is the write/maintenance surface, this plugin renders every existing memory store along the workspace's **ancestor chain** — the directory tree itself: any level may carry its own `.dsh-memory`, and children inherit every ancestor's memories — ending at the central (global) store, into one user-role context message folded into the **first turn's** model request. A new session therefore starts with its relevant experience already present — no need to ask the agent to consult the `memory` tool.
+The read-side automation half of the Rin memory system. While the `memory` tool (`@deepseek-ai/dsh-tool-memory`) is the write/maintenance surface, this plugin renders every existing memory store along the workspace's **ancestor chain** — the directory tree itself: any level may carry its own `.dsh-memory`, and children inherit every ancestor's memories — ending at the central (global) store, into one **catalogue** (titles and ids) folded into the **first turn's** model request. The agent then reads what is relevant through the `memory` tool instead of receiving every memory body — no need to ask the agent to consult the `memory` tool to know what exists.
 
 Later turns do not re-inject: the first-turn context stays in the session history, and re-injecting the payload on every request would waste the context budget. From turn 2 on, the agent queries memory through the `memory` tool on demand.
 
@@ -32,36 +32,36 @@ The chain resolves from the session's `header.cwd` upward through `@deepseek-ai/
 
 #### What the model sees
 
-One user-role context message in the first turn's request, when any store on the ancestor chain (or central) has memory — one section per store, nearest first:
+One user-role catalogue message in the first turn's request, when any store on the ancestor chain (or central) has memory — one section per store, nearest first, listing titles and ids only. Contents are fetched on demand through the `memory` tool, so the agent chooses what is relevant instead of receiving everything:
 
 ```markdown
-## Rin 记忆（workspace）
+## Rin 记忆目录（workspace）
 
-### Leaf（leaf）
-leaf experience
+- [leaf] Leaf
+- [bugfix/enoent] Fix ENOENT
 
-## Rin 记忆（..）
+## Rin 记忆目录（..）
 
-### Parent（parent）
-parent experience
+- [parent] Parent
 
-## Rin 记忆（central）
+## Rin 记忆目录（central）
 
-### Git 工具路径（env/git-tool-path）
-...
+- [env/git-tool-path] Git 工具路径
+
+需要详细内容时，用 memory read（scope 可选 workspace/chain/central）按 id 查询。
 ```
 
 The session's own store is labelled `workspace`; ancestor stores use their `..`-relative path from the session directory. Empty stores contribute nothing.
 
 #### Token effect
 
-The rendered memory content plus its headings, bounded by `maxBytes` (default 8192 bytes). Paid once per session (first turn); later turns keep the content through the session history instead of re-injecting.
+The catalogue lists titles and ids only (bounded by `maxBytes`, default 16384 bytes — enough for hundreds of entries), plus one fetch-hint line. Contents are paid only when the agent reads them. Paid once per session (first turn); later turns keep the catalogue through the session history instead of re-injecting.
 
 #### KV Cache effect
 
-The context message sits between the claimed prompt and the driver-appended runtime context. Its text is stable while the underlying memory nodes are unchanged; writing or editing a memory node changes the payload for subsequent requests, breaking the prefix at that position.
+The catalogue message sits between the claimed prompt and the driver-appended runtime context. Its text is stable while the underlying memory nodes are unchanged; writing or editing a memory node changes the payload for subsequent requests, breaking the prefix at that position.
 
 ## Known Limitations and Deferred Work
 
-- **Injection is chain-wide, not relevance-ranked** — every level renders up to `maxBytes`. Relevance ranking and tag/weight models are deferred to the Rin tree model.
+- **Catalogue is chain-wide, not relevance-ranked** — every level lists up to `maxBytes`; the agent picks what to read. Relevance ranking and tag/weight models are deferred to the Rin tree model.
 - **Per-step reads hit git** — each `agent/pre-step` and refresh reads store listings through git subprocess calls; fine at memory scale, but a projection cache should follow if stores grow large.

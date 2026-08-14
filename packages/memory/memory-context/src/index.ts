@@ -49,22 +49,21 @@ declare module '@deepseek-ai/dsh-llm' {
 
 /** Plugin configuration. */
 export interface Config {
-  /** Max rendered context bytes; sections beyond the budget are dropped from the tail (farthest levels first). */
+  /** Max rendered catalogue bytes; sections beyond the budget are dropped from the tail (farthest levels first). */
   maxBytes?: number
 }
 
 export const Config: Schema<Config> = z.object({
-  maxBytes: z.number().default(8192),
+  maxBytes: z.number().default(16 * 1024),
 })
 
-/** One rendered memory node. */
+/** One catalogue entry (title + id); contents are fetched on demand via the memory tool. */
 interface RenderNode {
   id: string
   title: string
-  content: string
 }
 
-/** One store-level section of the rendered context. */
+/** One store-level section of the rendered catalogue. */
 interface RenderSection {
   /** Section heading label (`workspace`, a `..`-relative path, or `central`). */
   label: string
@@ -82,16 +81,14 @@ function sameContextPayload(left: UserMessage, right: UserMessage): boolean {
     && isDeepStrictEqual(left.source, right.source)
 }
 
-/** Render one node as a markdown block. */
-function renderNodeBlock(node: RenderNode): string {
-  const title = node.title === node.id ? node.title : `${node.title}（${node.id}）`
-  return `### ${title}\n${node.content}`
-}
-
-/** Render one store's nodes into a section, or an empty string when the store is empty. */
+/** Render one store's memory catalogue (titles and ids only), or an empty string when empty. */
 function renderStoreSection(section: RenderSection): string {
   if (section.nodes.length === 0) return ''
-  return [`## Rin 记忆（${section.label}）`, '', ...section.nodes.map(renderNodeBlock)].join('\n')
+  const lines = [`## Rin 记忆目录（${section.label}）`, '']
+  for (const node of section.nodes) {
+    lines.push(`- [${node.id}] ${node.title}`)
+  }
+  return lines.join('\n')
 }
 
 /**
@@ -106,7 +103,7 @@ function chainLabel(cwd: string, store: string): string {
 /**
  * Fold the store sections into one bounded text. Sections are kept from the
  * head, so an over-budget chain drops its farthest (tail) sections rather
- * than truncating mid-node.
+ * than truncating mid-entry.
  */
 function renderBounded(sections: readonly RenderSection[], maxBytes: number): string {
   const rendered = sections
@@ -122,8 +119,11 @@ function renderBounded(sections: readonly RenderSection[], maxBytes: number): st
     kept.push(section)
     keptBytes += sectionBytes
   }
-  return `${kept.join('\n\n')}\n\n…（记忆超过上下文预算，已截断）`
+  return `${kept.join('\n\n')}\n\n…（记忆目录超过上下文预算，已截断；可用 memory list/read 查询其余）`
 }
+
+/** The fetch hint appended after the catalogue. */
+const CATALOGUE_HINT = '需要详细内容时，用 memory read（scope 可选 workspace/chain/central）按 id 查询。'
 
 /** Register the memory context injection. */
 export function apply(ctx: Context, config: Config = {}): void {
@@ -143,11 +143,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     const sections: RenderSection[] = chain.map(entry => ({
       label: entry.scope === 'central' ? CENTRAL_LABEL : chainLabel(cwd, entry.store),
       store: entry.store,
-      nodes: entry.nodes.map(node => ({ id: node.id, title: node.title, content: node.content })),
+      nodes: entry.nodes.map(node => ({ id: node.id, title: node.title })),
     }))
     if (sections.every(section => section.nodes.length === 0)) return undefined
-    const text = renderBounded(sections, maxBytes)
-    if (text === '') return undefined
+    const catalogue = renderBounded(sections, maxBytes)
+    if (catalogue === '') return undefined
+    const text = `${catalogue}\n\n${CATALOGUE_HINT}`
     return createUserMessage({
       content: [{ type: 'text', text }],
       source: {

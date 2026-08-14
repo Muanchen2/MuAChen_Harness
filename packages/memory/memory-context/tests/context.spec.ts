@@ -111,7 +111,7 @@ function rememberExecution(agent: Agent): ToolExecution {
 const successResult: ToolExecutionResult = { isError: false, value: { text: 'ok' }, content: [] }
 
 describe('the memory context injection', () => {
-  it('folds the workspace memory into the first step', async () => {
+  it('folds the workspace memory catalogue into the first step', async () => {
     const root = tempRoot('workspace')
     const workspace = join(root, 'ws')
     const { ctx, memories } = await liveContext(join(root, 'central'))
@@ -125,9 +125,11 @@ describe('the memory context injection', () => {
     expect(decision.kind).toBe('enter')
     const injected = memoryMessages(decision)[0]
     expect(injected).toBeDefined()
-    expect(injected?.text).toContain('## Rin 记忆（workspace）')
-    expect(injected?.text).toContain('Alpha')
-    expect(injected?.text).toContain('first experience')
+    expect(injected?.text).toContain('## Rin 记忆目录（workspace）')
+    expect(injected?.text).toContain('- [alpha] Alpha')
+    // contents are fetched on demand, not injected
+    expect(injected?.text).not.toContain('first experience')
+    expect(injected?.text).toContain('memory read')
   })
 
   it('includes the central store as the final chain level', async () => {
@@ -140,9 +142,9 @@ describe('the memory context injection', () => {
     const agent = stubAgent(workspace)
     const decision = await foldedDecision(ctx, agent)
     const injected = memoryMessages(decision)[0]
-    expect(injected?.text).toContain('local note')
-    expect(injected?.text).toContain('cross-project note')
-    expect(injected?.text).toContain('## Rin 记忆（central）')
+    expect(injected?.text).toContain('- [local] Local')
+    expect(injected?.text).toContain('- [shared] Shared')
+    expect(injected?.text).toContain('## Rin 记忆目录（central）')
   })
 
   it('injects nothing when both stores are empty', async () => {
@@ -158,20 +160,26 @@ describe('the memory context injection', () => {
     expect(agent.inbox.nextStep).toEqual([])
   })
 
-  it('bounds the rendered context and marks the trim', async () => {
+  it('bounds the rendered catalogue and marks the trim', async () => {
     const root = tempRoot('bounded')
     const workspace = join(root, 'ws')
-    const { ctx, memories } = await liveContext(join(root, 'central'), { maxBytes: 120 })
-    await memories.remember('workspace', workspace, {
-      id: 'big', title: 'Big', content: 'x'.repeat(500),
-    })
+    const { ctx, memories } = await liveContext(join(root, 'central'), { maxBytes: 150 })
+    // the nearest store fits the budget; the central catalogue does not
+    await memories.remember('workspace', workspace, { id: 'a1', title: 'A1', content: 'x' })
+    await memories.remember('workspace', workspace, { id: 'a2', title: 'A2', content: 'x' })
+    for (let index = 1; index <= 12; index += 1) {
+      await memories.remember('central', undefined, {
+        id: `c${String(index).padStart(2, '0')}`, title: `C${index}`, content: 'x',
+      })
+    }
 
     const decision = await foldedDecision(ctx, stubAgent(workspace))
     const injected = memoryMessages(decision)[0]
     expect(injected).toBeDefined()
-    expect(injected?.text.length).toBeLessThan(500)
     expect(injected?.text).toContain('已截断')
-  })
+    expect(injected?.text).toContain('- [a1] A1')
+    expect(injected?.text).not.toContain('- [c01] C1')
+  }, 20_000)
 
   it('refreshes the pending context after a memory remember tool result', async () => {
     const root = tempRoot('refresh')
@@ -192,11 +200,11 @@ describe('the memory context injection', () => {
       expect(message).toBeDefined()
       return message
     })
-    expect(blocksText(pending?.content)).toContain('fresh conclusion')
+    expect(blocksText(pending?.content)).toContain('- [fresh] Fresh')
 
     // The next proceeding step folds the pending context and clears it.
     const after = await foldedDecision(ctx, agent)
-    expect(memoryMessages(after).some(item => item.text.includes('fresh conclusion'))).toBe(true)
+    expect(memoryMessages(after).some(item => item.text.includes('- [fresh] Fresh'))).toBe(true)
   })
 
   it('does not re-enter a context whose payload already rides the request', async () => {
@@ -245,9 +253,9 @@ describe('the memory context injection', () => {
     const decision = await foldedDecision(ctx, stubAgent(b))
     const injected = memoryMessages(decision)[0]
     expect(injected).toBeDefined()
-    expect(injected?.text).toContain('## Rin 记忆（workspace）')
-    expect(injected?.text).toContain('leaf level')
-    expect(injected?.text).toContain('## Rin 记忆（..）')
-    expect(injected?.text).toContain('parent level')
+    expect(injected?.text).toContain('## Rin 记忆目录（workspace）')
+    expect(injected?.text).toContain('- [leaf] Leaf')
+    expect(injected?.text).toContain('## Rin 记忆目录（..）')
+    expect(injected?.text).toContain('- [parent] Parent')
   })
 })
