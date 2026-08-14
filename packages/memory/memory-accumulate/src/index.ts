@@ -8,7 +8,9 @@
  * through the `memory` tool (editing or dropping as it sees fit). Judgment is
  * the system's — reliable without trusting agent self-discipline — while the
  * write stays a conscious agent action, so noise never enters the stores
- * silently.
+ * silently. The same judgment also proposes a handoff memo when the turn
+ * clearly leaves a task unfinished, so cross-session handoffs no longer rely
+ * on agent self-discipline either.
  *
  * @module @deepseek-ai/dsh-memory-accumulate
  */
@@ -29,7 +31,7 @@ import type Schema from '@deepseek-ai/schemastery'
 export const name = 'memory-accumulate'
 export const inject = ['llm', 'memories']
 
-/** One candidate memory proposed by the judge. */
+/** One candidate memory (or handoff memo) proposed by the judge. */
 export interface MemoryCandidate {
   readonly title: string
   readonly content: string
@@ -42,6 +44,8 @@ export interface MemoryAccumulateSource {
   readonly turn: number
   /** Candidate titles, for quick scanning. */
   readonly candidates: readonly string[]
+  /** Handoff candidate titles, for quick scanning. */
+  readonly handoffs: readonly string[]
 }
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -54,7 +58,7 @@ declare module '@deepseek-ai/dsh-llm' {
 export interface Config {
   /** When to run the judge: every turn end, or only turns with tool activity. */
   trigger?: 'on-activity' | 'always'
-  /** Max candidate memories one turn may produce. */
+  /** Max candidate memories or handoff memos one turn may produce. */
   maxCandidates?: number
   /** How many trailing messages the judge sees. */
   maxInputMessages?: number
@@ -86,20 +90,27 @@ const JUDGE_SYSTEM = [
   '你是一个 AI 会话记忆筛选器，从会话片段中识别值得长期记住的项目经验。',
   '保留：修好的 bug、做出的架构决策、解决的坑、学到的环境或工具路径、带理由的立场改变。',
   '丢弃：纯过程叙述、状态汇报、琐碎内容。',
-  '只输出一个 JSON 对象：{"candidates":[{"title":"简短标题","content":"事实性内容（发生了什么、结论）"}]}。',
-  '没有候选时输出 {"candidates":[]}。JSON 之外不要输出任何文字。',
+  '另识别交接需求：若片段明确表明任务尚未完成（用户要求"下次继续/先到这/还没搞定"，或助手总结出未完成的下一步与遗留坑），',
+  '输出交接单候选：{"handoffs":[{"title":"简短任务名","content":"交接单内容，按 目标/进度/下一步/遗留坑/相关文件 五段组织"}]}。',
+  '任务已完成或片段无交接信号时输出 {"handoffs":[]}。',
+  '只输出一个 JSON 对象：{"candidates":[{"title":"简短标题","content":"事实性内容（发生了什么、结论）"}],"handoffs":[...]}。',
+  '没有候选时输出 {"candidates":[],"handoffs":[]}。JSON 之外不要输出任何文字。',
 ].join('\n')
 
 /** The verifier's stable system instruction: compare candidates against real stored memories. */
 const VERIFY_SYSTEM = [
-  '你是记忆去重核实器。判断候选记忆是否与已有记忆重复：同主题即算重复，即使表述完全不同。',
+  '你是记忆去重核实器。判断候选记忆与交接单是否与已有记忆重复：同主题即算重复，即使表述完全不同。',
   '已有记忆以"标题｜内容摘要"列出，逐条对照候选。',
-  '只输出 JSON：{"candidates":[保留的候选原样条目]}（重复的移除）。',
-  '没有保留时输出 {"candidates":[]}。JSON 之外不要输出任何文字。',
+  '只输出 JSON：{"candidates":[保留的候选原样条目],"handoffs":[保留的交接单原样条目]}（重复的移除）。',
+  '没有保留时输出 {"candidates":[],"handoffs":[]}。JSON 之外不要输出任何文字。',
 ].join('\n')
 
 /** Per-session candidates awaiting presentation; cleared once presented. */
-const pendingCandidates = new WeakMap<Session, { turn: number; list: MemoryCandidate[] }>()
+const pendingCandidates = new WeakMap<Session, {
+  turn: number
+  candidates: MemoryCandidate[]
+  handoffs: MemoryCandidate[]
+}>()
 /** Sessions with tool activity in the current turn, for the on-activity trigger. */
 const activeTurns = new WeakSet<Session>()
 
@@ -132,14 +143,14 @@ function frameMessages(messages: readonly Message[]): string {
   return `待筛选的会话片段（JSON 数组）：\n${JSON.stringify(view)}`
 }
 
-/** Parse the judge's JSON answer tolerantly (code fences and stray prose allowed). */
-export function parseCandidates(text: string, max: number): MemoryCandidate[] {
+/** Parse one array of `{title, content}` entries from the judge's JSON answer. */
+function parseList(text: string, key: 'candidates' | 'handoffs', max: number): MemoryCandidate[] {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start < 0 || end <= start) return []
   try {
     const parsed: unknown = JSON.parse(text.slice(start, end + 1))
-    const list = (parsed as { candidates?: unknown } | null)?.candidates
+    const list = (parsed as Record<string, unknown> | null)?.[key]
     if (!Array.isArray(list)) return []
     return list
       .filter((candidate): candidate is { title: string; content: string } =>
@@ -152,6 +163,16 @@ export function parseCandidates(text: string, max: number): MemoryCandidate[] {
   } catch {
     return []
   }
+}
+
+/** Parse the judge's candidate-memory list tolerantly (code fences and stray prose allowed). */
+export function parseCandidates(text: string, max: number): MemoryCandidate[] {
+  return parseList(text, 'candidates', max)
+}
+
+/** Parse the judge's handoff-memo list tolerantly (code fences and stray prose allowed). */
+export function parseHandoffs(text: string, max: number): MemoryCandidate[] {
+  return parseList(text, 'handoffs', max)
 }
 
 /** The session's route: explicit config pair, else the latest request header. */
@@ -254,24 +275,25 @@ export function apply(ctx: Context, config: Config = {}): void {
       const judgeSystem = existing.length === 0
         ? JUDGE_SYSTEM
         : `${JUDGE_SYSTEM}\n\n以下主题已存在于记忆库，不要重复提议：\n${existing.join('\n')}`
-      const list = parseCandidates(
-        await llmText(ctx, route, session, judgeSystem, framed, maxOutputTokens, timeoutMs),
-        maxCandidates,
-      )
-      if (list.length === 0) return
+      const judgeText = await llmText(ctx, route, session, judgeSystem, framed, maxOutputTokens, timeoutMs)
+      const list = parseCandidates(judgeText, maxCandidates)
+      const handoffs = parseHandoffs(judgeText, maxCandidates)
+      if (list.length === 0 && handoffs.length === 0) return
       let verified = list
+      let verifiedHandoffs = handoffs
       if (existing.length > 0) {
         try {
-          const verifyInput = `候选记忆：\n${JSON.stringify(list)}\n\n已有记忆（标题｜内容摘要）：\n${existing.join('\n')}`
-          verified = parseCandidates(
-            await llmText(ctx, route, session, VERIFY_SYSTEM, verifyInput, maxOutputTokens, timeoutMs),
-            maxCandidates,
-          )
+          const verifyInput = `候选记忆：\n${JSON.stringify({ candidates: list, handoffs })}\n\n已有记忆（标题｜内容摘要）：\n${existing.join('\n')}`
+          const verifiedText = await llmText(ctx, route, session, VERIFY_SYSTEM, verifyInput, maxOutputTokens, timeoutMs)
+          verified = parseCandidates(verifiedText, maxCandidates)
+          verifiedHandoffs = parseHandoffs(verifiedText, maxCandidates)
         } catch (error) {
           ctx.logger.warn('memory-accumulate: verification failed, keeping unverified candidates: %o', error)
         }
       }
-      if (verified.length > 0) pendingCandidates.set(session, { turn, list: verified })
+      if (verified.length > 0 || verifiedHandoffs.length > 0) {
+        pendingCandidates.set(session, { turn, candidates: verified, handoffs: verifiedHandoffs })
+      }
     } catch (error) {
       ctx.logger.warn('memory-accumulate: judgment failed: %o', error)
     }
@@ -296,23 +318,41 @@ export function apply(ctx: Context, config: Config = {}): void {
     const pending = pendingCandidates.get(agent.session)
     if (pending === undefined) return decision
     if (decision.kind === 'reject' || decision.messages.length === 0) return decision
-    const text = [
-      `## 记忆沉淀候选（来自第 ${pending.turn} 轮）`,
-      '',
-      '系统检测到以下可能值得记住的项目经验，请决定是否写入 memory：',
-      ...pending.list.flatMap((candidate, index) => [
-        `${index + 1}. ${candidate.title}`,
-        `   ${candidate.content.replace(/\n/g, '\n   ')}`,
-      ]),
-      '',
-      '可用 memory remember 写入（按命名约定选择 id，同主题则更新已有记忆），修改后写入或忽略均可。',
-    ].join('\n')
+    const sections: string[] = []
+    if (pending.candidates.length > 0) {
+      sections.push(
+        `## 记忆沉淀候选（来自第 ${pending.turn} 轮）`,
+        '',
+        '系统检测到以下可能值得记住的项目经验，请决定是否写入 memory：',
+        ...pending.candidates.flatMap((candidate, index) => [
+          `${index + 1}. ${candidate.title}`,
+          `   ${candidate.content.replace(/\n/g, '\n   ')}`,
+        ]),
+        '',
+        '可用 memory remember 写入（按命名约定选择 id，同主题则更新已有记忆），修改后写入或忽略均可。',
+      )
+    }
+    if (pending.handoffs.length > 0) {
+      sections.push(
+        `## 交接单候选（来自第 ${pending.turn} 轮）`,
+        '',
+        '系统检测到当前任务尚未完成，建议写入 handoff 交接单，下次会话会主动读取衔接：',
+        ...pending.handoffs.flatMap((candidate, index) => [
+          `${index + 1}. ${candidate.title}`,
+          `   ${candidate.content.replace(/\n/g, '\n   ')}`,
+        ]),
+        '',
+        '可用 memory remember 以 handoff/<任务名> 写入（结构：目标/进度/下一步/遗留坑/相关文件），或忽略。',
+      )
+    }
+    const text = sections.join('\n')
     const desired = createUserMessage({
       content: [{ type: 'text', text }],
       source: {
         kind: 'rin-accumulate',
         turn: pending.turn,
-        candidates: pending.list.map(candidate => candidate.title),
+        candidates: pending.candidates.map(candidate => candidate.title),
+        handoffs: pending.handoffs.map(candidate => candidate.title),
       },
     })
     pendingCandidates.delete(agent.session)

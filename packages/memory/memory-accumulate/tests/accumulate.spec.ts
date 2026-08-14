@@ -13,7 +13,7 @@ import type { ToolExecution, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import MemoryService from '@deepseek-ai/dsh-memory'
 import * as accumulate from '../src/index.ts'
-import { parseCandidates } from '../src/index.ts'
+import { parseCandidates, parseHandoffs } from '../src/index.ts'
 
 const contexts: Context[] = []
 const roots: string[] = []
@@ -266,5 +266,76 @@ describe('the memory accumulation plugin', () => {
     expect(parseCandidates('{"candidates":[{"title":"","content":"x"}]}', 2)).toEqual([])
     expect(parseCandidates('{"candidates":[{"title":"t","content":"c"},{"title":"t2","content":"c2"},{"title":"t3","content":"c3"}]}', 2))
       .toHaveLength(2)
+  })
+
+  it('judges a handoff when the turn leaves the task unfinished', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      textChunks(JSON.stringify({ candidates: [], handoffs: [
+        { title: '记忆分支语义收尾', content: '## 交接单：记忆分支语义收尾\n目标：交付分支语义\n进度：已完成\n下一步：推送' },
+      ] })),
+    ]))
+    const agent = stubAgent()
+    toolResult(ctx, agent)
+    endTurn(ctx, agent, 1)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+
+    const decision = await stepDecision(ctx, agent, [userPrompt])
+    const [injected] = accumulateMessages(decision)
+    expect(injected).toBeDefined()
+    expect(injected?.text).toContain('交接单候选')
+    expect(injected?.text).toContain('记忆分支语义收尾')
+    expect(injected?.text).toContain('handoff/<任务名>')
+  })
+
+  it('presents handoffs even when the judge finds no memory candidates', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      textChunks(JSON.stringify({ candidates: [], handoffs: [{ title: '未完成的任务', content: '目标：x' }] })),
+    ]))
+    const agent = stubAgent()
+    toolResult(ctx, agent)
+    endTurn(ctx, agent, 1)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+
+    const decision = await stepDecision(ctx, agent, [userPrompt])
+    const [injected] = accumulateMessages(decision)
+    expect(injected).toBeDefined()
+    expect(injected?.text).toContain('交接单候选')
+    expect(injected?.text).toContain('未完成的任务')
+    expect(injected?.text).not.toContain('记忆沉淀候选')
+  })
+
+  it('verifies handoffs against stored handoff memos before presenting', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      // first call: the judge proposes a duplicate handoff (and one fresh one)
+      textChunks(JSON.stringify({ candidates: [], handoffs: [
+        { title: '重复交接单', content: '和已有交接单同主题' },
+        { title: '新交接单', content: '真正的新任务' },
+      ] })),
+      // second call: the verifier drops the duplicate
+      textChunks(JSON.stringify({ candidates: [], handoffs: [{ title: '新交接单', content: '真正的新任务' }] })),
+    ]))
+    const workspace = join(tempRoot('handoff-verify'), 'ws')
+    await ctx.memories.remember('workspace', workspace, {
+      id: 'handoff/rin-handoff', title: '重复交接单', content: '同主题内容',
+    })
+    const agent = stubAgent(workspace)
+    toolResult(ctx, agent)
+    endTurn(ctx, agent, 1)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(2) })
+
+    const decision = await stepDecision(ctx, agent, [userPrompt])
+    const [injected] = accumulateMessages(decision)
+    expect(injected).toBeDefined()
+    expect(injected?.text).toContain('新交接单')
+    expect(injected?.text).not.toContain('重复交接单')
+  })
+
+  it('parseHandoffs tolerates fences, stray prose, and garbage', () => {
+    expect(parseHandoffs('```json\n{"handoffs":[{"title":"t","content":"c"}]}\n```', 2))
+      .toEqual([{ title: 't', content: 'c' }])
+    expect(parseHandoffs('no json here', 2)).toEqual([])
+    expect(parseHandoffs('{"handoffs":"nope"}', 2)).toEqual([])
+    expect(parseHandoffs('{"handoffs":[{"title":"","content":"x"}]}', 2)).toEqual([])
+    expect(parseHandoffs('{"candidates":[{"title":"t","content":"c"}]}', 2)).toEqual([])
   })
 })

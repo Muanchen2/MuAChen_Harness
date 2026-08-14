@@ -6,6 +6,8 @@ Rin memory accumulation: turn-end judgment proposes candidate memories for the a
 
 The write-side automation half of the Rin memory system (half-automatic distillation). At each turn end an auxiliary LLM call judges whether the turn produced experience worth keeping — a bug fixed, a decision made, a pitfall solved, a learned path. Candidates are cached per session and presented to the agent at the next step boundary as a `rin-accumulate` context message; the agent decides to write them through the `memory` tool (editing or dropping as it sees fit).
 
+The same judgment also proposes a handoff memo when the turn clearly leaves a task unfinished (the user says "next time", or the assistant closes with open next steps and pitfalls), so cross-session handoffs no longer rely on agent self-discipline either; the agent confirms them as `handoff/<task>` memories.
+
 Judgment is the system's — reliable without trusting agent self-discipline — while the write stays a conscious agent action, so noise never enters the stores silently. The `memory` tool's dedup hints (same-directory ids) then steer an accepted candidate toward updating an existing node instead of creating a duplicate.
 
 ## Plugin
@@ -17,7 +19,7 @@ Injects `llm`.
 | Field | Default | Meaning |
 |---|---|---|
 | `trigger` | `on-activity` | When to run the judge: `on-activity` (only turns with tool results) or `always` (every turn end). |
-| `maxCandidates` | `2` | Max candidate memories one turn may produce. |
+| `maxCandidates` | `2` | Max candidate memories or handoff memos one turn may produce. |
 | `maxInputMessages` | `12` | Trailing messages the judge sees. |
 | `maxInputBytes` | `16384` | Max framed judge input in UTF-8 bytes; larger turns are skipped. |
 | `maxOutputTokens` | `512` | Judge output-token cap. |
@@ -27,7 +29,8 @@ Injects `llm`.
 ## Design
 
 - `session/event` `turn/end` → judge (unless `on-activity` and the turn had no `tools/result`).
-- The judge streams an auxiliary `ctx.llm` call (route from config or the latest `request/header`) over the trailing session messages framed as JSON, asking for `{"candidates":[{title, content}]}`; the answer is parsed tolerantly (code fences and stray prose allowed).
+- The judge streams an auxiliary `ctx.llm` call (route from config or the latest `request/header`) over the trailing session messages framed as JSON, asking for `{"candidates":[{title, content}], "handoffs":[{title, content}]}` where `handoffs` carries unfinished-task memos (目标/进度/下一步/遗留坑/相关文件 structure); the answer is parsed tolerantly (code fences and stray prose allowed).
+- Both lists are deduplicated against the stored ancestor-chain memories by a second verifier call; handoff memos already present as `handoff/<task>` nodes are dropped.
 - Candidates are cached per session (`WeakMap`); the next `agent/pre-step` folds one `rin-accumulate` user message into the request and clears the cache, so candidates are presented exactly once.
 - Failures (route missing, timeout, parse failure, stream error) are logged and skipped; the session never blocks on judgment.
 
@@ -47,10 +50,23 @@ One `rin-accumulate` context message at the first step after a judged turn, when
    store 目录缺失导致 spawn 失败
 ```
 
+A handoff proposal renders as a second section, when present:
+
+```markdown
+## 交接单候选（来自第 3 轮）
+
+系统检测到当前任务尚未完成，建议写入 handoff 交接单，下次会话会主动读取衔接：
+1. 记忆分支语义收尾
+   ## 交接单：记忆分支语义收尾
+   目标：交付分支语义
+   进度：已完成
+   下一步：推送
+```
+
 #### Token effect
 
-- Judge calls: one per judged turn, input = trailing messages (bounded by `maxInputMessages`/`maxInputBytes`), output capped by `maxOutputTokens`.
-- Candidate messages: only when candidates exist, once per session.
+- Judge calls: one per judged turn, input = trailing messages (bounded by `maxInputMessages`/`maxInputBytes`), output capped by `maxOutputTokens`. A dedup verifier call follows when the ancestor chain holds memories.
+- Candidate messages: only when candidates or handoffs exist, once per session.
 
 #### KV Cache effect
 
