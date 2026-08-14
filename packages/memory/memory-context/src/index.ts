@@ -21,7 +21,7 @@ import { dirname, relative } from 'node:path'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ChainContent } from '@deepseek-ai/dsh-memory'
-import type { UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
@@ -208,10 +208,30 @@ export function apply(ctx: Context, config: Config = {}): void {
     while ((refresh = refreshTails.get(agent)) !== undefined) await refresh
   }
 
+  // Session → agent/turn facts: the injection must only run inside turn 1.
+  // Inbox messages are claimed by the agent loop BEFORE `agent/pre-step`
+  // fires, so a refresh landing in the inbox during turn 2+ would still ride
+  // the request despite the turn gate — refresh must be gated at the source.
+  const agentRefs = new WeakMap<Session, Agent>()
+  const turnState = new WeakMap<Session, number>()
+
+  ctx.on('session/event', (session, event) => {
+    if (event.type !== 'turn/end') return
+    // A finished turn must not leave pending context behind: the next turn's
+    // inbox claim would otherwise carry it into the request.
+    const agent = agentRefs.get(session)
+    if (agent === undefined) return
+    for (const message of agent.inbox.nextStep.filter(isMemoryContext)) {
+      agent.inbox.remove(message.id)
+    }
+  })
+
   ctx.on('agent/pre-step', async (
     { agent, messages, turn, step, signal },
     next,
   ): Promise<PreStepDecision> => {
+    agentRefs.set(agent.session, agent)
+    turnState.set(agent.session, turn)
     const decision = await next()
     // Only the first turn carries the automatic memory context. Later turns
     // already hold it in the session history, and re-injecting the payload on
@@ -251,7 +271,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     const args = exec.arguments
     if (exec.name === 'memory'
       && typeof args === 'object' && args !== null
-      && 'action' in args && args.action === 'remember') {
+      && 'action' in args && args.action === 'remember'
+      && turnState.get(exec.agent.session) === 1) {
       queueRefresh(exec.agent)
     }
   })

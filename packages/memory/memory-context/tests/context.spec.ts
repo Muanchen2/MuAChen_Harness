@@ -242,6 +242,28 @@ describe('the memory context injection', () => {
     expect(agent.inbox.nextStep).toEqual([])
   })
 
+  it('does not refresh the catalogue after a remember outside turn 1', async () => {
+    const root = tempRoot('late-refresh')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'alpha', title: 'Alpha', content: 'first experience' })
+
+    const agent = stubAgent(workspace)
+    // turn 1 runs; turn 2 is now the current turn
+    await foldedDecision(ctx, agent)
+    await stepDecision(ctx, agent, [], 1, 2)
+
+    // a remember inside turn 2 must NOT refresh the pending context
+    await memories.remember('workspace', workspace, { id: 'beta', title: 'Beta', content: 'second' })
+    ctx.emit('tools/result', rememberExecution(agent), successResult)
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(agent.inbox.nextStep).toEqual([])
+
+    // and the next turn-2 step carries no injection either
+    const decision = await stepDecision(ctx, agent, [], 1, 2)
+    expect(memoryMessages(decision)).toEqual([])
+  })
+
   it('injects ancestor-chain stores from nearest to farthest', async () => {
     const root = tempRoot('chain-inject')
     const a = join(root, 'a')
