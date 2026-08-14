@@ -14,6 +14,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 import type { MemoryService } from '@deepseek-ai/dsh-memory'
+import { branchNameError } from '@deepseek-ai/dsh-memory'
 
 /** Which store a memory lives in; mirrors `@deepseek-ai/dsh-memory`'s scope. */
 export type MemoryScope = 'workspace' | 'central'
@@ -40,9 +41,10 @@ const MEMORY_GUIDANCE = '使用 memory 工具持久化与回顾跨会话的项�
   + '同主题记忆；有则用相同 id 更新（保留演进历史），避免同主题散成多条互相矛盾的记忆。在达成有意义'
   + '的结论后立即 remember：修好了一个 bug、做出了架构决策、解决了一个坑、学到了环境或工具路径、'
   + '或者改变了立场。**并行探索多个方案时，用 memory branch 开分支（如 task-x/attempt-a）分别记录，'
-  + '方案确认后用 memory merge 合并回主线；merge 冲突时先 read 两边内容，整合成综合结论更新到目标节点后'
-  + '再重试。**任务未完成需要交接时，写 handoff/<任务名> 交接单（结构：目标/进度/下一步/'
-  + '遗留坑/相关文件）。记忆保持事实性与简洁；可复用的方法存入 skills，经验存入 memory。'
+  + '分支名只允许小写字母、数字、连字符，多级用 / 分隔（如 task-x/attempt-a，不允许大写、下划线、'
+  + '空格或中文）；方案确认后用 memory merge 合并回主线；merge 冲突时先 read 两边内容，整合成综合'
+  + '结论更新到目标节点后再重试。**任务未完成需要交接时，写 handoff/<任务名> 交接单（结构：目标/进度/'
+  + '下一步/遗留坑/相关文件）。记忆保持事实性与简洁；可复用的方法存入 skills，经验存入 memory。'
 
 const OUTPUT = {
   schema: {
@@ -100,6 +102,8 @@ async function renderMemory(
       const target = branchScope()
       if (typeof target !== 'string') return target.error
       if (args.id === undefined) return 'memory:branch requires a branch name (id)'
+      const nameError = branchNameError(args.id)
+      if (nameError !== undefined) return nameError
       const result = await memories.branch(target, workspace, args.id)
       return `switched to branch ${result.branch}`
     }

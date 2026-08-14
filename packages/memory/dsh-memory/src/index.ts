@@ -34,6 +34,22 @@ import type {
 
 export type { ChainContent, ChainStore, MergeConflict, MergeResult } from './types.ts'
 
+/**
+ * Branch names are restricted to kebab-case segments joined by `/` (e.g.
+ * `task-x/attempt-a`), so parallel conclusion lines stay machine-typed and
+ * cannot smuggle git metacharacters or free-form labels into branch creation.
+ * Each segment starts and ends with a lowercase letter or digit.
+ * @param name - the proposed branch name.
+ * @returns a model-facing error message, or undefined when the name is valid.
+ */
+export function branchNameError(name: string): string | undefined {
+  if (name.length === 0) return 'memory:branch name must not be empty — use lowercase letters, digits, and hyphens, e.g. task-x/attempt-a'
+  if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/.test(name)) {
+    return `memory:branch name "${name}" is invalid — use lowercase letters, digits, and hyphens (segments joined by /), e.g. task-x/attempt-a`
+  }
+  return undefined
+}
+
 /** Config for the memory service. Storage roots are directory locations for each store scope. */
 export interface Config {
   /** Central (cross-project) memory store directory. Defaults to `<dshHome>/memory`. */
@@ -318,9 +334,12 @@ export class MemoryService extends Service {
    * parallel conclusion line (e.g. two approaches explored at once).
    * @param scope - which store to branch.
    * @param workspace - workspace path (used only for `scope: 'workspace'`).
-   * @param name - the new branch name.
+   * @param name - the new branch name, in the format `task-x/attempt-a`.
+   * @throws when `name` violates the branch-name format.
    */
   async branch(scope: MemoryScope, workspace: string | undefined, name: string): Promise<{ branch: string }> {
+    const error = branchNameError(name)
+    if (error !== undefined) throw new Error(error)
     const dir = await this.resolveStore(scope, workspace)
     await this.git.createBranch(dir, name)
     return { branch: name }

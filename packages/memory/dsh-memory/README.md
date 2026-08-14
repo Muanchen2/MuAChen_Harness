@@ -26,6 +26,10 @@ The hierarchy is the directory tree itself, not a fixed set of scopes: any direc
 
 A memory id maps to a store-relative path: `/`-separated ids become nested directories (`bugfix/enoent` → `bugfix/enoent.md`), created on write and scanned recursively by `list`. The `.git` directory and any `README.md` are never counted as memories. Invalid ids (empty or blank segments, `..`, `.`, backslashes, leading/trailing slashes, whitespace, Windows-hostile characters) are rejected with `memory: invalid id "…"`.
 
+### Branch names
+
+A branch name is one or more kebab-case segments joined by `/` (e.g. `task-x/attempt-a`); each segment starts and ends with a lowercase letter or digit. `branch` rejects anything else — uppercase, underscores, whitespace, non-ASCII, leading/trailing or doubled `/`, or a segment led by `-` — with a `memory: branch name "…" is invalid` error before any git operation, so parallel conclusion lines stay machine-typed.
+
 ### Scope
 
 | `scope` | Store location | Purpose |

@@ -294,6 +294,21 @@ describe('the memory service over a git-backed store', () => {
     expect(await memories.listBranches('workspace', workspace)).toEqual(['attempt-a', 'master'])
   })
 
+  it('rejects branch names that violate the naming rule, before touching git', async () => {
+    const root = tempRoot('branch-guard')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'alpha', title: 'Alpha', content: 'v1' })
+
+    for (const bad of ['Task-x', 'task_x', 'task x', 'task.x', '任务', '-x', 'x-', '/x', 'x/', 'x//y', '']) {
+      await expect(memories.branch('workspace', workspace, bad)).rejects.toThrow(/memory:branch name/)
+      expect(await memories.currentBranch('workspace', workspace)).toBe('master')
+    }
+
+    await memories.branch('workspace', workspace, 'task-x/attempt-a')
+    expect(await memories.currentBranch('workspace', workspace)).toBe('task-x/attempt-a')
+  })
+
   it('merges a branch cleanly and reports the brought-in nodes', async () => {
     const root = tempRoot('merge-clean')
     const workspace = join(root, 'ws')
