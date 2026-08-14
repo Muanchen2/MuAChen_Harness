@@ -19,9 +19,18 @@ import { Service, Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { GitBackend } from './git-backend.ts'
-import type { MemoryNode, MemoryScope, MemoryTimelineEntry, MemoryWriteResult } from './types.ts'
+import type {
+  ChainContent,
+  ChainStore,
+  MemoryNode,
+  MemoryScope,
+  MemoryTimelineEntry,
+  MemoryWriteResult,
+} from './types.ts'
+
+export type { ChainContent, ChainStore } from './types.ts'
 
 /** Config for the memory service. Storage roots are directory locations for each store scope. */
 export interface Config {
@@ -122,7 +131,135 @@ export class MemoryService extends Service {
    */
   async timeline(scope: MemoryScope, workspace: string | undefined, id: string): Promise<MemoryTimelineEntry[]> {
     const dir = await this.resolveStore(scope, workspace)
-    const history = await this.git.logFile(dir, nodePath(id))
+    return this.timelineAt(dir, nodePath(id))
+  }
+
+  /**
+   * Collect the existing memory stores along `workspace`'s ancestor chain,
+   * nearest first, ending at the filesystem root. Levels without a store are
+   * skipped and NEVER created — chain reads must not materialize stores.
+   * @param workspace - the directory whose ancestor chain to walk.
+   * @returns absolute store directories (`<dir>/.dsh-memory`), nearest first.
+   */
+  async ancestorStores(workspace: string): Promise<string[]> {
+    const fs = await import('node:fs/promises')
+    const stores: string[] = []
+    let dir = resolve(workspace)
+    for (;;) {
+      const candidate = join(dir, '.dsh-memory')
+      try {
+        if ((await fs.stat(candidate)).isDirectory()) stores.push(candidate)
+      } catch {
+        // no store at this level
+      }
+      const parent = dirname(dir)
+      if (parent === dir) break
+      dir = parent
+    }
+    return stores
+  }
+
+  /**
+   * List the memory node ids of the complete inheritance chain: every existing
+   * store along `workspace`'s ancestor directories, nearest first, followed by
+   * the central (global) store when it has content.
+   * @param workspace - the directory whose ancestor chain to walk.
+   * @returns one entry per existing, committed store on the chain.
+   */
+  async listChain(workspace: string): Promise<ChainStore[]> {
+    const chain: ChainStore[] = []
+    for (const store of await this.ancestorStores(workspace)) {
+      if (!(await this.storeHasCommits(store))) continue
+      chain.push({ store, ids: await this.listMarkdownIds(store) })
+    }
+    if (await this.storeHasCommits(this.centralRoot)) {
+      chain.push({ store: this.centralRoot, ids: await this.listMarkdownIds(this.centralRoot) })
+    }
+    return chain
+  }
+
+  /**
+   * Load every memory node of the complete inheritance chain — the injection
+   * view: ancestor-directory stores nearest first, then the central store.
+   * @param workspace - the directory whose ancestor chain to walk.
+   * @returns one entry per existing, committed store with its full nodes.
+   */
+  async loadChain(workspace: string): Promise<ChainContent[]> {
+    const chain: ChainContent[] = []
+    for (const store of await this.ancestorStores(workspace)) {
+      if (!(await this.storeHasCommits(store))) continue
+      chain.push({ store, scope: 'workspace', nodes: await this.loadStoreNodes(store, 'workspace') })
+    }
+    if (await this.storeHasCommits(this.centralRoot)) {
+      chain.push({ store: this.centralRoot, scope: 'central', nodes: await this.loadStoreNodes(this.centralRoot, 'central') })
+    }
+    return chain
+  }
+
+  /**
+   * Read one node from the complete inheritance chain, nearest store first,
+   * falling back to the central store.
+   * @param workspace - the directory whose ancestor chain to walk.
+   * @param id - the memory node id.
+   * @returns the node, its timeline, and the store that held it; undefined when absent everywhere.
+   */
+  async readChain(
+    workspace: string,
+    id: string,
+  ): Promise<{ node: MemoryNode; timeline: MemoryTimelineEntry[]; store: string } | undefined> {
+    const relPath = nodePath(id)
+    for (const store of await this.ancestorStores(workspace)) {
+      const found = await this.readNodeAt(store, relPath, id, 'workspace')
+      if (found !== undefined) return found
+    }
+    if (await this.storeHasCommits(this.centralRoot)) {
+      return this.readNodeAt(this.centralRoot, relPath, id, 'central')
+    }
+    return undefined
+  }
+
+  /** Whether a store directory exists and holds at least one commit. */
+  private async storeHasCommits(dir: string): Promise<boolean> {
+    const fs = await import('node:fs/promises')
+    try {
+      if (!(await fs.stat(dir)).isDirectory()) return false
+    } catch {
+      return false
+    }
+    return this.git.hasCommits(dir)
+  }
+
+  /** Read every node of one store. */
+  private async loadStoreNodes(store: string, scope: MemoryScope): Promise<MemoryNode[]> {
+    const nodes: MemoryNode[] = []
+    for (const id of await this.listMarkdownIds(store)) {
+      const content = await this.git.readFile(store, nodePath(id))
+      if (content === undefined) continue
+      nodes.push({ id, title: firstHeading(content) ?? id, content: stripHeading(content), scope, branch: 'default' })
+    }
+    return nodes
+  }
+
+  /** Read one node inside an already-resolved store, or undefined when absent. */
+  private async readNodeAt(
+    store: string,
+    relPath: string,
+    id: string,
+    scope: MemoryScope,
+  ): Promise<{ node: MemoryNode; timeline: MemoryTimelineEntry[]; store: string } | undefined> {
+    const content = await this.git.readFile(store, relPath)
+    if (content === undefined) return undefined
+    const title = firstHeading(content) ?? id
+    return {
+      node: { id, title, content: stripHeading(content), scope, branch: 'default' },
+      timeline: await this.timelineAt(store, relPath),
+      store,
+    }
+  }
+
+  /** One node's change history inside an already-resolved store. */
+  private async timelineAt(store: string, relPath: string): Promise<MemoryTimelineEntry[]> {
+    const history = await this.git.logFile(store, relPath)
     return history.map((entry, index) => ({
       revision: entry.revision,
       at: entry.at,
@@ -147,25 +284,45 @@ export class MemoryService extends Service {
     return join(workspace, '.dsh-memory')
   }
 
-  /** Read store-root `*.md` basenames (strip the extension) as node ids. */
+  /** Read store-relative `*.md` node ids recursively; `.git` internals and README.md never count. */
   private async listMarkdownIds(dir: string): Promise<string[]> {
     const fs = await import('node:fs/promises')
-    let entries: string[]
-    try {
-      entries = await fs.readdir(dir)
-    } catch {
-      return []
+    const walk = async (relative: string): Promise<string[]> => {
+      const found: string[] = []
+      let names: string[]
+      try {
+        names = await fs.readdir(join(dir, relative))
+      } catch {
+        return found
+      }
+      for (const name of names) {
+        const rel = relative === '' ? name : `${relative}/${name}`
+        const info = await fs.stat(join(dir, rel)).catch(() => undefined)
+        if (info === undefined) continue
+        if (info.isDirectory()) {
+          if (name === '.git') continue
+          found.push(...await walk(rel))
+        } else if (name.endsWith('.md') && name !== 'README.md') {
+          found.push(rel.slice(0, -3))
+        }
+      }
+      return found
     }
-    return entries
-      .filter(name => name.endsWith('.md') && name !== 'README.md')
-      .map(name => name.slice(0, -3))
-      .sort()
+    return (await walk('')).sort()
   }
 }
 
-/** Map a memory id to its store-relative path. An id becomes the basename. */
+/**
+ * Map a memory id to its store-relative path. A `/`-separated id becomes a
+ * nested path (`bugfix/alpha` → `bugfix/alpha.md`); every segment must be
+ * non-empty and free of path traversal, separators, and filesystem-hostile
+ * characters.
+ */
 function nodePath(id: string): string {
-  if (id.length === 0 || id !== id.trim() || /\.\.|[/\\]/.test(id)) {
+  if (id.length === 0 || id !== id.trim() || /[\\<>:"|?*\u0000-\u001f]/.test(id)) {
+    throw new Error(`memory: invalid id "${id}"`)
+  }
+  if (id.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) {
     throw new Error(`memory: invalid id "${id}"`)
   }
   return `${id}.md`

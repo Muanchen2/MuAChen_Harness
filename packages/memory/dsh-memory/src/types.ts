@@ -58,3 +58,26 @@ export interface MemoryWriteResult {
   readonly node: MemoryNode
   readonly timeline: MemoryTimelineEntry[]
 }
+
+/**
+ * One store on the ancestor chain with its memory node ids.
+ * @param store - absolute store directory (`<dir>/.dsh-memory`).
+ * @param ids - sorted node ids in that store.
+ */
+export interface ChainStore {
+  readonly store: string
+  readonly ids: string[]
+}
+
+/**
+ * One store on the ancestor chain with its full nodes, for injection-style
+ * consumers that render every level.
+ * @param store - absolute store directory.
+ * @param scope - `workspace` for directory-chain stores, `central` for the global store.
+ * @param nodes - the store's memory nodes.
+ */
+export interface ChainContent {
+  readonly store: string
+  readonly scope: MemoryScope
+  readonly nodes: MemoryNode[]
+}

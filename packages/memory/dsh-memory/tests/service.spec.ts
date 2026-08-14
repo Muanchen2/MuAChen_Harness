@@ -189,4 +189,91 @@ describe('the memory service over a git-backed store', () => {
       'memory: a workspace path is required for the workspace store',
     )
   })
+
+  it('stores and lists hierarchical ids as nested paths', async () => {
+    const root = tempRoot('hierarchy')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+
+    await memories.remember('workspace', workspace, {
+      id: 'bugfix/enoent', title: 'Fix ENOENT', content: 'nested under bugfix',
+    })
+    await memories.remember('workspace', workspace, {
+      id: 'feature/context-injection', title: 'Context injection', content: 'nested under feature',
+    })
+    await memories.remember('workspace', workspace, {
+      id: 'flat', title: 'Flat', content: 'stays at the store root',
+    })
+
+    expect(await memories.list('workspace', workspace)).toEqual([
+      'bugfix/enoent', 'feature/context-injection', 'flat',
+    ])
+    const found = await memories.read('workspace', workspace, 'bugfix/enoent')
+    expect(found?.node.content).toBe('nested under bugfix')
+    const timeline = await memories.timeline('workspace', workspace, 'feature/context-injection')
+    expect(timeline.at(0)?.action).toBe('created')
+  })
+
+  it('scans nested directories recursively and ignores .git and README.md', async () => {
+    const root = tempRoot('recursive')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+
+    await memories.remember('workspace', workspace, { id: 'a/deep/nested', title: 'Deep', content: 'x' })
+    const store = join(workspace, '.dsh-memory')
+    const fs = await import('node:fs/promises')
+    await fs.writeFile(join(store, 'README.md'), '# store notes\n', 'utf8')
+    await fs.writeFile(join(store, 'a', 'README.md'), '# dir notes\n', 'utf8')
+    await fs.writeFile(join(store, '.git', 'fake.md'), 'not a memory\n', 'utf8')
+
+    expect(await memories.list('workspace', workspace)).toEqual(['a/deep/nested'])
+  })
+
+  it('rejects ids with traversal, absolute, trailing, empty, or backslash segments', async () => {
+    const root = tempRoot('invalid-ids')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+
+    for (const id of ['..', '../escape', 'a/../b', '/absolute', 'trailing/', 'a//b', 'a\\b', '', ' spaced ']) {
+      await expect(memories.remember('workspace', workspace, { id, title: 'Bad', content: 'x' }))
+        .rejects.toThrow(`memory: invalid id "${id}"`)
+    }
+  })
+
+  it('walks the ancestor chain: nearest first, skipping and never creating absent levels', async () => {
+    const root = tempRoot('chain')
+    const a = join(root, 'a')
+    const b = join(a, 'b')
+    const c = join(b, 'c')
+    const { memories } = await service(join(root, 'central'))
+
+    // only the top level and the deepest level have stores; `b` has none
+    await memories.remember('workspace', a, { id: 'parent-note', title: 'Parent', content: 'a-level' })
+    await memories.remember('workspace', c, { id: 'leaf-note', title: 'Leaf', content: 'c-level' })
+    await memories.remember('central', undefined, { id: 'global', title: 'Global', content: 'central-level' })
+
+    const stores = await memories.ancestorStores(c)
+    expect(stores).toEqual([join(c, '.dsh-memory'), join(a, '.dsh-memory')])
+    // a chain read must not materialize the missing middle store
+    expect(await import('node:fs/promises').then(m => m.stat(join(b, '.dsh-memory'))).catch(() => undefined))
+      .toBeUndefined()
+
+    // the chain ends with the central (global) store
+    const chain = await memories.listChain(c)
+    expect(chain.map(entry => entry.ids)).toEqual([['leaf-note'], ['parent-note'], ['global']])
+    expect(chain.at(-1)?.store).toBe(join(root, 'central'))
+
+    const loaded = await memories.loadChain(c)
+    expect(loaded.map(entry => entry.nodes.map(node => node.id))).toEqual([['leaf-note'], ['parent-note'], ['global']])
+    expect(loaded.at(-1)?.scope).toBe('central')
+
+    // nearest store wins; the central store is the final fallback
+    const found = await memories.readChain(c, 'parent-note')
+    expect(found?.store).toBe(join(a, '.dsh-memory'))
+    expect(found?.node.content).toBe('a-level')
+    const global = await memories.readChain(c, 'global')
+    expect(global?.store).toBe(join(root, 'central'))
+    expect(global?.node.scope).toBe('central')
+    expect(await memories.readChain(c, 'absent')).toBeUndefined()
+  })
 })

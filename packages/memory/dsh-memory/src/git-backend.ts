@@ -111,7 +111,9 @@ export class GitBackend {
    *   when the file has no history.
    */
   async logFile(dir: string, relPath: string): Promise<Array<{ revision: string; at: string; message: string }>> {
-    const result = await this.git(dir, ['log', '--format=%H%x00%cI%x00%s%x00', '--', relPath])
+    // `--follow` keeps the trace across renames, so a memory moved into a
+    // hierarchy directory keeps its pre-move history.
+    const result = await this.git(dir, ['log', '--follow', '--format=%H%x00%cI%x00%s%x00', '--', relPath])
     if (result.code !== 0 || result.stdout === '') return []
     const fields = result.stdout.split('\0')
     const entries: Array<{ revision: string; at: string; message: string }> = []
