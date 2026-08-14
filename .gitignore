@@ -39,3 +39,4 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 .dsh-memory/
+dsh-web.log
