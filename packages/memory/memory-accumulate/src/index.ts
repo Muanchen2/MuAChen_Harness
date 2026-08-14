@@ -18,6 +18,7 @@ import { isDeepStrictEqual } from 'node:util'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { BlockAssembler, createUserMessage, deepFreeze } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import type { MemoryService } from '@deepseek-ai/dsh-memory'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
@@ -26,7 +27,7 @@ import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 
 export const name = 'memory-accumulate'
-export const inject = ['llm']
+export const inject = ['llm', 'memories']
 
 /** One candidate memory proposed by the judge. */
 export interface MemoryCandidate {
@@ -160,6 +161,21 @@ function resolveRoute(
   return undefined
 }
 
+/** Titles of every memory already on the session's ancestor chain (dedup guard for the judge). */
+async function existingMemoryTitles(
+  memories: MemoryService,
+  session: Session,
+): Promise<string[]> {
+  const cwd = session.header.cwd
+  if (cwd === undefined) return []
+  try {
+    const chain = await memories.loadChain(cwd)
+    return chain.flatMap(entry => entry.nodes.map(node => node.title))
+  } catch {
+    return []
+  }
+}
+
 function samePayload(left: UserMessage, right: UserMessage): boolean {
   return isDeepStrictEqual(left.content, right.content)
     && isDeepStrictEqual(left.source, right.source)
@@ -185,12 +201,19 @@ export function apply(ctx: Context, config: Config = {}): void {
         content: [{ type: 'text', text: framed }],
         source: { kind: 'plugin', plugin: 'dsh-memory-accumulate' },
       })]
+      // Existing memory titles go to the judge so it does not re-propose
+      // topics that are already stored — the duplicate-candidate cycle the
+      // agent kept having to reject by hand.
+      const existingTitles = await existingMemoryTitles(ctx.memories, session)
+      const system = existingTitles.length === 0
+        ? JUDGE_SYSTEM
+        : `${JUDGE_SYSTEM}\n\n以下主题已存在于记忆库，不要重复提议：\n${existingTitles.join('\n')}`
       using callDeadline = deadline(new AbortController().signal, timeoutMs, 'MEMORY_ACCUMULATE_TIMEOUT')
       const options: GenerateOptions = deepFreeze({
         provider: route.provider,
         model: route.model,
         messages,
-        system: JUDGE_SYSTEM,
+        system,
         maxTokens: maxOutputTokens,
         sessionId: session.id,
         signal: callDeadline.signal,

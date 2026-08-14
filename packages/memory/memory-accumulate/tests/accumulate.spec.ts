@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { CallId, LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -7,14 +10,24 @@ import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 import type { ToolExecution, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import MemoryService from '@deepseek-ai/dsh-memory'
 import * as accumulate from '../src/index.ts'
 import { parseCandidates } from '../src/index.ts'
 
 const contexts: Context[] = []
+const roots: string[] = []
 
 afterEach(async () => {
   for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
+
+function tempRoot(label: string): string {
+  const root = mkdtempSync(join(tmpdir(), `dsh-accumulate-${label}-`))
+  roots.push(root)
+  return root
+}
 
 /** Minimal scripted adapter: records requests, answers from a fixed chunk list. */
 class FakeAdapter extends LlmAdapter {
@@ -48,20 +61,25 @@ function textChunks(text: string): StreamChunk[] {
 async function liveContext(
   adapter: FakeAdapter,
   config: accumulate.Config = {},
-): Promise<{ ctx: Context; adapter: FakeAdapter }> {
+): Promise<{ ctx: Context; adapter: FakeAdapter; centralRoot: string }> {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(LlmRuntime)
   ctx.llm.registerAdapter(['mock'], adapter)
+  await ctx.plugin(LocalSubprocessRuntime)
+  const centralRoot = join(tempRoot('central'), 'central')
+  await ctx.plugin(MemoryService, { centralRoot })
   await ctx.plugin(accumulate, Object.assign({ provider: 'mock', model: 'm' }, config))
-  return { ctx, adapter }
+  return { ctx, adapter, centralRoot }
 }
 
 const testSignal = new AbortController().signal
 
-function stubAgent(): Agent {
+function stubAgent(cwd?: string): Agent {
   const id = SessionId('s1')
-  const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0 })
+  const session = Session.create(id, [], cwd === undefined
+    ? { version: SESSION_FORMAT_VERSION, id, createdAt: 0 }
+    : { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd })
   return {
     ctx: new Context(),
     id: SessionId('a1'),
@@ -194,6 +212,20 @@ describe('the memory accumulation plugin', () => {
 
     const decision = await stepDecision(ctx, agent, [userPrompt])
     expect(accumulateMessages(decision)).toEqual([])
+  })
+
+  it('feeds existing memory titles to the judge so topics are not re-proposed', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter(textChunks('{"candidates":[]}')))
+    const workspace = join(tempRoot('dedup'), 'ws')
+    await ctx.memories.remember('workspace', workspace, {
+      id: 'design/rin-handoff', title: '会话交接机制设计', content: 'x',
+    })
+    const agent = stubAgent(workspace)
+    toolResult(ctx, agent)
+    endTurn(ctx, agent, 1)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+    expect(adapter.requests[0]?.system).toContain('会话交接机制设计')
+    expect(adapter.requests[0]?.system).toContain('不要重复提议')
   })
 
   it('parseCandidates tolerates fences, stray prose, and garbage', () => {
