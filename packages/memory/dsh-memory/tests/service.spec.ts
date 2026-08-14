@@ -167,6 +167,21 @@ describe('the memory service over a git-backed store', () => {
     expect(await memories.read('workspace', join(root, 'ws'), 'absent')).toBeUndefined()
   })
 
+  it('lists, reads, and timelines an absent store as empty and initializes it', async () => {
+    const root = tempRoot('absent-store')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+
+    expect(await memories.list('workspace', workspace)).toEqual([])
+    expect(await memories.read('workspace', workspace, 'anything')).toBeUndefined()
+    expect(await memories.timeline('workspace', workspace, 'anything')).toEqual([])
+    expect(await memories.list('central', undefined)).toEqual([])
+    expect(await memories.read('central', undefined, 'anything')).toBeUndefined()
+    // the first touch creates the store as its own git repository, ready for a write
+    const storeGitDir = join(workspace, '.dsh-memory', '.git')
+    expect(await import('node:fs/promises').then(m => m.stat(storeGitDir)).then(s => s.isDirectory())).toBe(true)
+  })
+
   it('rejects a workspace-scoped operation without a workspace path', async () => {
     const root = tempRoot('nopath')
     const { memories } = await service(join(root, 'central'))

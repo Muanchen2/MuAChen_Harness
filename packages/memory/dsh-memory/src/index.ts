@@ -67,8 +67,7 @@ export class MemoryService extends Service {
     workspace: string | undefined,
     input: { id: string; title: string; content: string; message?: string },
   ): Promise<MemoryWriteResult> {
-    const dir = this.storeDir(scope, workspace)
-    await this.git.ensureRepo(dir)
+    const dir = await this.resolveStore(scope, workspace)
     const relPath = nodePath(input.id)
     await writeUtf8(join(dir, relPath), `# ${input.title}\n\n${input.content}\n`)
     await this.git.commit(dir, input.message ?? `memory: ${input.title}`)
@@ -90,7 +89,7 @@ export class MemoryService extends Service {
     workspace: string | undefined,
     id: string,
   ): Promise<{ node: MemoryNode; timeline: MemoryTimelineEntry[] } | undefined> {
-    const dir = this.storeDir(scope, workspace)
+    const dir = await this.resolveStore(scope, workspace)
     if (!(await this.git.hasCommits(dir))) return undefined
     const content = await this.git.readFile(dir, nodePath(id))
     if (content === undefined) return undefined
@@ -105,7 +104,7 @@ export class MemoryService extends Service {
    * @returns the sorted list of node ids (`*.md` basenames in the store root).
    */
   async list(scope: MemoryScope, workspace: string | undefined): Promise<string[]> {
-    const dir = this.storeDir(scope, workspace)
+    const dir = await this.resolveStore(scope, workspace)
     if (!(await this.git.hasCommits(dir))) return []
     return this.listMarkdownIds(dir)
   }
@@ -122,7 +121,7 @@ export class MemoryService extends Service {
    * @returns the timeline entries.
    */
   async timeline(scope: MemoryScope, workspace: string | undefined, id: string): Promise<MemoryTimelineEntry[]> {
-    const dir = this.storeDir(scope, workspace)
+    const dir = await this.resolveStore(scope, workspace)
     const history = await this.git.logFile(dir, nodePath(id))
     return history.map((entry, index) => ({
       revision: entry.revision,
@@ -130,6 +129,13 @@ export class MemoryService extends Service {
       action: index === history.length - 1 ? 'created' : 'updated',
       message: entry.message,
     }))
+  }
+
+  /** Resolve the git store directory for a scope, creating and initializing it when absent. */
+  private async resolveStore(scope: MemoryScope, workspace: string | undefined): Promise<string> {
+    const dir = this.storeDir(scope, workspace)
+    await this.git.ensureRepo(dir)
+    return dir
   }
 
   /** Resolve the git store directory for a scope. */
