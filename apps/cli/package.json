@@ -64,6 +64,7 @@
     "@deepseek-ai/dsh-tool-fs-search": "workspace:^",
     "@deepseek-ai/dsh-tool-goal": "workspace:^",
     "@deepseek-ai/dsh-memory": "workspace:^",
+    "@deepseek-ai/dsh-memory-accumulate": "workspace:^",
     "@deepseek-ai/dsh-memory-context": "workspace:^",
     "@deepseek-ai/dsh-tool-memory": "workspace:^",
     "@deepseek-ai/dsh-tool-pwsh": "workspace:^",
