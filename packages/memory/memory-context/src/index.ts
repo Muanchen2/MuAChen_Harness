@@ -127,7 +127,7 @@ const CATALOGUE_HINT = '需要详细内容时，用 memory read（scope 可选 w
 
 /** Register the memory context injection. */
 export function apply(ctx: Context, config: Config = {}): void {
-  const maxBytes = config.maxBytes ?? 8192
+  const maxBytes = config.maxBytes ?? 16 * 1024
 
   const lifecycle = new AbortController()
   ctx.effect(() => () => {
@@ -148,7 +148,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (sections.every(section => section.nodes.length === 0)) return undefined
     const catalogue = renderBounded(sections, maxBytes)
     if (catalogue === '') return undefined
-    const text = `${catalogue}\n\n${CATALOGUE_HINT}`
+    // Unfinished handoff memos deserve explicit attention: the session should
+    // pick the task up instead of waiting to be told.
+    const handoffs = sections.flatMap(section => section.nodes.filter(node => node.id.startsWith('handoff/')))
+    const handoffNote = handoffs.length === 0
+      ? ''
+      : `\n\n⏳ 有 ${handoffs.length} 条未完成任务交接单（handoff/）：${handoffs.map(node => node.id).join('、')}。请用 memory read 读取并衔接继续。`
+    const text = `${catalogue}\n\n${CATALOGUE_HINT}${handoffNote}`
     return createUserMessage({
       content: [{ type: 'text', text }],
       source: {

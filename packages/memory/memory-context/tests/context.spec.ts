@@ -280,4 +280,19 @@ describe('the memory context injection', () => {
     expect(injected?.text).toContain('## Rin 记忆目录（..）')
     expect(injected?.text).toContain('- [parent] Parent')
   })
+
+  it('flags unfinished handoff memos for immediate pickup', async () => {
+    const root = tempRoot('handoff-note')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'handoff/task-x', title: '交接单：任务 X', content: '目标：…' })
+    await memories.remember('workspace', workspace, { id: 'bugfix/other', title: 'Other', content: 'x' })
+
+    const decision = await foldedDecision(ctx, stubAgent(workspace))
+    const injected = memoryMessages(decision)[0]
+    expect(injected).toBeDefined()
+    expect(injected?.text).toContain('未完成任务交接单')
+    expect(injected?.text).toContain('handoff/task-x')
+    expect(injected?.text).toContain('memory read 读取并衔接继续')
+  })
 })
