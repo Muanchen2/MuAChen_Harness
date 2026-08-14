@@ -28,9 +28,11 @@ import type {
   MemoryScope,
   MemoryTimelineEntry,
   MemoryWriteResult,
+  MergeConflict,
+  MergeResult,
 } from './types.ts'
 
-export type { ChainContent, ChainStore } from './types.ts'
+export type { ChainContent, ChainStore, MergeConflict, MergeResult } from './types.ts'
 
 /** Config for the memory service. Storage roots are directory locations for each store scope. */
 export interface Config {
@@ -309,6 +311,78 @@ export class MemoryService extends Service {
       return found
     }
     return (await walk('')).sort()
+  }
+
+  /**
+   * Create a branch from the current HEAD and switch to it — the start of a
+   * parallel conclusion line (e.g. two approaches explored at once).
+   * @param scope - which store to branch.
+   * @param workspace - workspace path (used only for `scope: 'workspace'`).
+   * @param name - the new branch name.
+   */
+  async branch(scope: MemoryScope, workspace: string | undefined, name: string): Promise<{ branch: string }> {
+    const dir = await this.resolveStore(scope, workspace)
+    await this.git.createBranch(dir, name)
+    return { branch: name }
+  }
+
+  /** Switch to an existing branch. */
+  async checkout(scope: MemoryScope, workspace: string | undefined, name: string): Promise<{ branch: string }> {
+    const dir = await this.resolveStore(scope, workspace)
+    await this.git.checkoutBranch(dir, name)
+    return { branch: name }
+  }
+
+  /** The current branch name of a store. */
+  async currentBranch(scope: MemoryScope, workspace: string | undefined): Promise<string | undefined> {
+    const dir = await this.resolveStore(scope, workspace)
+    return this.git.currentBranch(dir)
+  }
+
+  /** Every branch of a store, sorted. */
+  async listBranches(scope: MemoryScope, workspace: string | undefined): Promise<string[]> {
+    const dir = await this.resolveStore(scope, workspace)
+    return this.git.listBranches(dir)
+  }
+
+  /**
+   * Merge `from` into the current branch. A clean merge commits and reports
+   * the node ids it brought in. Conflicts roll the merge back and report both
+   * sides per node — the caller reconciles (e.g. updates the target node to a
+   * combined conclusion) and retries, optionally with a conflict strategy that
+   * resolves conflicts in favor of the current branch (`ours`) or the merged
+   * branch (`theirs`).
+   * @param scope - which store to merge in.
+   * @param workspace - workspace path (used only for `scope: 'workspace'`).
+   * @param from - the branch to merge into the current one.
+   * @param strategy - conflict resolution strategy for the merge.
+   */
+  async merge(
+    scope: MemoryScope,
+    workspace: string | undefined,
+    from: string,
+    strategy?: 'ours' | 'theirs',
+  ): Promise<MergeResult> {
+    const dir = await this.resolveStore(scope, workspace)
+    const headBefore = await this.git.revParseHead(dir)
+    const clean = await this.git.startMerge(dir, from, strategy)
+    if (clean) {
+      await this.git.commit(dir, `memory: merge branch ${from}`)
+      const changed = headBefore === undefined ? [] : await this.git.diffFiles(dir, headBefore, 'HEAD')
+      const merged = changed
+        .filter(path => path.endsWith('.md'))
+        .map(path => path.slice(0, -3))
+      return { merged, conflicts: [] }
+    }
+    const conflicts: MergeConflict[] = []
+    for (const relPath of await this.git.conflictedFiles(dir)) {
+      const id = relPath.endsWith('.md') ? relPath.slice(0, -3) : relPath
+      const toContent = await this.git.showFile(dir, 'HEAD', relPath)
+      const fromContent = await this.git.showFile(dir, from, relPath)
+      conflicts.push({ id, toContent: toContent ?? '', fromContent: fromContent ?? '' })
+    }
+    await this.git.abortMerge(dir)
+    return { merged: [], conflicts }
   }
 }
 

@@ -276,4 +276,82 @@ describe('the memory service over a git-backed store', () => {
     expect(global?.node.scope).toBe('central')
     expect(await memories.readChain(c, 'absent')).toBeUndefined()
   })
+
+  it('branches, lists, and switches branches of a store', async () => {
+    const root = tempRoot('branches')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'alpha', title: 'Alpha', content: 'v1' })
+
+    await memories.branch('workspace', workspace, 'attempt-a')
+    expect(await memories.currentBranch('workspace', workspace)).toBe('attempt-a')
+    await memories.remember('workspace', workspace, { id: 'beta', title: 'Beta', content: 'on attempt-a' })
+
+    await memories.checkout('workspace', workspace, 'master')
+    expect(await memories.currentBranch('workspace', workspace)).toBe('master')
+    expect(await memories.read('workspace', workspace, 'beta')).toBeUndefined()
+
+    expect(await memories.listBranches('workspace', workspace)).toEqual(['attempt-a', 'master'])
+  })
+
+  it('merges a branch cleanly and reports the brought-in nodes', async () => {
+    const root = tempRoot('merge-clean')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'alpha', title: 'Alpha', content: 'base' })
+
+    await memories.branch('workspace', workspace, 'feature-x')
+    await memories.remember('workspace', workspace, { id: 'feature/n', title: 'N', content: 'only on the branch' })
+
+    await memories.checkout('workspace', workspace, 'master')
+    const result = await memories.merge('workspace', workspace, 'feature-x')
+    expect(result.conflicts).toEqual([])
+    expect(result.merged).toEqual(['feature/n'])
+    expect((await memories.read('workspace', workspace, 'feature/n'))?.node.content).toBe('only on the branch')
+  })
+
+  it('rolls back a conflicting merge, reports both sides, and merges after reconciliation', async () => {
+    const root = tempRoot('merge-conflict')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'initial' })
+
+    await memories.branch('workspace', workspace, 'attempt-a')
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'approach A conclusion' })
+
+    await memories.checkout('workspace', workspace, 'master')
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'mainline conclusion' })
+
+    const result = await memories.merge('workspace', workspace, 'attempt-a')
+    expect(result.conflicts).toHaveLength(1)
+    expect(result.conflicts[0]?.id).toBe('design/x')
+    expect(result.conflicts[0]?.toContent).toContain('mainline conclusion')
+    expect(result.conflicts[0]?.fromContent).toContain('approach A conclusion')
+    // the merge was rolled back: the mainline still holds its own version
+    expect((await memories.read('workspace', workspace, 'design/x'))?.node.content).toBe('mainline conclusion')
+
+    // reconcile by updating the target node, then retry keeping the reconciled mainline version
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'combined: A refined by mainline' })
+    const retry = await memories.merge('workspace', workspace, 'attempt-a', 'ours')
+    expect(retry.conflicts).toEqual([])
+    expect((await memories.read('workspace', workspace, 'design/x'))?.node.content).toBe('combined: A refined by mainline')
+  })
+
+  it('resolves a conflict in favor of the merged branch with the theirs strategy', async () => {
+    const root = tempRoot('merge-theirs')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'initial' })
+
+    await memories.branch('workspace', workspace, 'attempt-a')
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'approach A conclusion' })
+
+    await memories.checkout('workspace', workspace, 'master')
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'mainline conclusion' })
+
+    const result = await memories.merge('workspace', workspace, 'attempt-a', 'theirs')
+    expect(result.conflicts).toEqual([])
+    expect(result.merged).toEqual(['design/x'])
+    expect((await memories.read('workspace', workspace, 'design/x'))?.node.content).toBe('approach A conclusion')
+  })
 })

@@ -81,3 +81,26 @@ export interface ChainContent {
   readonly scope: MemoryScope
   readonly nodes: MemoryNode[]
 }
+
+/**
+ * One merge conflict: a memory node changed on both branches.
+ * @param id - the conflicting node id.
+ * @param toContent - the version on the merge target (current) branch.
+ * @param fromContent - the version on the merged branch.
+ */
+export interface MergeConflict {
+  readonly id: string
+  readonly toContent: string
+  readonly fromContent: string
+}
+
+/**
+ * The outcome of merging one branch into the current one.
+ * @param merged - node ids the merge brought in (clean merges).
+ * @param conflicts - nodes changed on both sides; the merge was rolled back and
+ *   the caller must reconcile these (e.g. update the target node) before retrying.
+ */
+export interface MergeResult {
+  readonly merged: string[]
+  readonly conflicts: MergeConflict[]
+}

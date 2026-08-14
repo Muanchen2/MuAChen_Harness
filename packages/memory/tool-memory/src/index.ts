@@ -15,6 +15,9 @@ import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 import type { MemoryService } from '@deepseek-ai/dsh-memory'
 
+/** Which store a memory lives in; mirrors `@deepseek-ai/dsh-memory`'s scope. */
+export type MemoryScope = 'workspace' | 'central'
+
 export const name = 'tool-memory'
 export const inject = ['tools', 'memories', 'systemPrompt']
 
@@ -36,7 +39,9 @@ const MEMORY_GUIDANCE = '使用 memory 工具持久化与回顾跨会话的项�
   + '主动用 memory read 读取并衔接继续，不要等用户提醒。**写入前先查重：用 memory list 查看是否已有'
   + '同主题记忆；有则用相同 id 更新（保留演进历史），避免同主题散成多条互相矛盾的记忆。在达成有意义'
   + '的结论后立即 remember：修好了一个 bug、做出了架构决策、解决了一个坑、学到了环境或工具路径、'
-  + '或者改变了立场。任务未完成需要交接时，写 handoff/<任务名> 交接单（结构：目标/进度/下一步/'
+  + '或者改变了立场。**并行探索多个方案时，用 memory branch 开分支（如 task-x/attempt-a）分别记录，'
+  + '方案确认后用 memory merge 合并回主线；merge 冲突时先 read 两边内容，整合成综合结论更新到目标节点后'
+  + '再重试。**任务未完成需要交接时，写 handoff/<任务名> 交接单（结构：目标/进度/下一步/'
   + '遗留坑/相关文件）。记忆保持事实性与简洁；可复用的方法存入 skills，经验存入 memory。'
 
 const OUTPUT = {
@@ -62,12 +67,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     name: 'memory',
     description: 'Persist or recall cross-session project experience (memory), distinct from skills (methods).',
     parameters: {
-      action: { type: 'string', required: true, enum: ['remember', 'read', 'list', 'timeline'] },
+      action: { type: 'string', required: true, enum: ['remember', 'read', 'list', 'timeline', 'branch', 'checkout', 'current-branch', 'list-branches', 'merge'] },
       scope: { type: 'string', required: true, enum: ['workspace', 'central', 'chain'] },
       id: { type: 'string', description: 'Memory node id for read/timeline, or the id to save under for remember.' },
       title: { type: 'string', description: 'Title for remember; the new memory heading.' },
       content: { type: 'string', description: 'Body for remember; the experience to persist.' },
       message: { type: 'string', description: 'Optional one-line commit note for this change.' },
+      strategy: { type: 'string', description: 'Conflict resolution for merge: ours (keep target) or theirs (keep merged).' },
     },
     output: OUTPUT,
     execute(args, exec) {
@@ -82,11 +88,60 @@ export function apply(ctx: Context, config: Config = {}): void {
 async function renderMemory(
   memories: MemoryService,
   cwd: string | undefined,
-  args: { action: string; scope: 'workspace' | 'central' | 'chain'; id?: string; title?: string; content?: string; message?: string },
+  args: { action: string; scope: 'workspace' | 'central' | 'chain'; id?: string; title?: string; content?: string; message?: string; strategy?: string },
 ): Promise<string> {
   const scope = args.scope
   const workspace = scope === 'workspace' ? cwd : undefined
+  /** Narrow the scope for branch operations: chain has no branchable store. */
+  const branchScope = (): MemoryScope | { error: string } =>
+    scope === 'chain' ? { error: 'memory:branch operations require workspace or central scope' } : scope
   switch (args.action) {
+    case 'branch': {
+      const target = branchScope()
+      if (typeof target !== 'string') return target.error
+      if (args.id === undefined) return 'memory:branch requires a branch name (id)'
+      const result = await memories.branch(target, workspace, args.id)
+      return `switched to branch ${result.branch}`
+    }
+    case 'checkout': {
+      const target = branchScope()
+      if (typeof target !== 'string') return target.error
+      if (args.id === undefined) return 'memory:checkout requires a branch name (id)'
+      const result = await memories.checkout(target, workspace, args.id)
+      return `switched to branch ${result.branch}`
+    }
+    case 'current-branch': {
+      const target = branchScope()
+      if (typeof target !== 'string') return target.error
+      const branch = await memories.currentBranch(target, workspace)
+      return branch === undefined ? 'no branch (unborn or detached HEAD)' : branch
+    }
+    case 'list-branches': {
+      const target = branchScope()
+      if (typeof target !== 'string') return target.error
+      const branches = await memories.listBranches(target, workspace)
+      return branches.length === 0 ? 'no branches' : branches.join('\n')
+    }
+    case 'merge': {
+      const target = branchScope()
+      if (typeof target !== 'string') return target.error
+      if (args.id === undefined) return 'memory:merge requires the branch to merge (id)'
+      const strategy = args.strategy === 'ours' || args.strategy === 'theirs' ? args.strategy : undefined
+      const result = await memories.merge(target, workspace, args.id, strategy)
+      if (result.conflicts.length > 0) {
+        const lines = ['merge rolled back due to conflicts:']
+        for (const conflict of result.conflicts) {
+          lines.push(`- ${conflict.id}`)
+          lines.push(`  target: ${conflict.toContent.replace(/\n/g, ' ').slice(0, 160)}`)
+          lines.push(`  merged: ${conflict.fromContent.replace(/\n/g, ' ').slice(0, 160)}`)
+        }
+        lines.push('reconcile each conflict (e.g. update the target node with a combined conclusion), then retry merge')
+        return lines.join('\n')
+      }
+      return result.merged.length === 0
+        ? `merged branch ${args.id} (nothing new)`
+        : `merged branch ${args.id}:\n${result.merged.join('\n')}`
+    }
     case 'remember': {
       if (scope === 'chain') return 'memory:remember requires workspace or central scope'
       const id = args.id ?? slug(args.title) ?? `memory-${Date.now()}`

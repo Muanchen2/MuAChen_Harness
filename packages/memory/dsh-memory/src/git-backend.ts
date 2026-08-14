@@ -128,6 +128,102 @@ export class GitBackend {
     return entries
   }
 
+  /**
+   * Create a branch from the current HEAD and switch to it.
+   * @param dir - the memory store directory.
+   * @param name - the new branch name.
+   */
+  async createBranch(dir: string, name: string): Promise<void> {
+    const result = await this.git(dir, ['checkout', '-b', name])
+    if (result.code !== 0) throw new Error(`memory git branch failed: ${result.stderr}`)
+  }
+
+  /**
+   * Switch to an existing branch.
+   * @param dir - the memory store directory.
+   * @param name - the branch name.
+   */
+  async checkoutBranch(dir: string, name: string): Promise<void> {
+    const result = await this.git(dir, ['checkout', name])
+    if (result.code !== 0) throw new Error(`memory git checkout failed: ${result.stderr}`)
+  }
+
+  /**
+   * The current branch name.
+   * @param dir - the memory store directory.
+   * @returns the branch name, or undefined on a detached/unborn HEAD.
+   */
+  async currentBranch(dir: string): Promise<string | undefined> {
+    const result = await this.git(dir, ['branch', '--show-current'])
+    const name = result.stdout.trim()
+    return name === '' ? undefined : name
+  }
+
+  /** Every branch name, sorted. */
+  async listBranches(dir: string): Promise<string[]> {
+    const result = await this.git(dir, ['branch', '--format=%(refname:short)'])
+    return result.stdout.split('\n').map(line => line.trim()).filter(line => line !== '').sort()
+  }
+
+  /** The current HEAD commit hash, or undefined for an unborn HEAD. */
+  async revParseHead(dir: string): Promise<string | undefined> {
+    const result = await this.git(dir, ['rev-parse', 'HEAD'])
+    return result.code === 0 ? result.stdout.trim() || undefined : undefined
+  }
+
+  /**
+   * Start a merge of `from` into the current branch without committing.
+   * Identity is inlined like {@link commit}: stores never carry global git
+   * config, and merge still requires a committer identity. An optional
+   * conflict strategy makes git resolve conflicts in favor of the current
+   * branch (`ours`) or the merged branch (`theirs`) instead of failing.
+   * @param dir - the memory store directory.
+   * @param from - the branch to merge in.
+   * @param strategy - conflict resolution strategy, when given.
+   * @returns whether the merge is clean (no conflicts).
+   */
+  async startMerge(dir: string, from: string, strategy?: 'ours' | 'theirs'): Promise<boolean> {
+    const args = [
+      '-c', 'user.name=rin', '-c', 'user.email=rin@localhost',
+      'merge', '--no-commit', '--no-ff',
+      ...strategy === undefined ? [] : ['-X', strategy],
+      from,
+    ]
+    const result = await this.git(dir, args)
+    return result.code === 0
+  }
+
+  /**
+   * Store-relative paths of files with merge conflicts (empty when none).
+   */
+  async conflictedFiles(dir: string): Promise<string[]> {
+    const result = await this.git(dir, ['diff', '--name-only', '--diff-filter=U'])
+    return result.stdout.split('\n').map(line => line.trim()).filter(line => line !== '')
+  }
+
+  /** Store-relative paths changed between two revisions. */
+  async diffFiles(dir: string, fromRev: string, toRev: string): Promise<string[]> {
+    const result = await this.git(dir, ['diff', '--name-only', `${fromRev}..${toRev}`])
+    return result.stdout.split('\n').map(line => line.trim()).filter(line => line !== '')
+  }
+
+  /** Abort an in-progress merge, restoring the pre-merge working tree. */
+  async abortMerge(dir: string): Promise<void> {
+    await this.git(dir, ['merge', '--abort'])
+  }
+
+  /**
+   * Read one file as of a revision/branch.
+   * @param dir - the memory store directory.
+   * @param rev - a revision or branch name.
+   * @param relPath - store-relative path.
+   * @returns the content, or undefined when absent at that revision.
+   */
+  async showFile(dir: string, rev: string, relPath: string): Promise<string | undefined> {
+    const result = await this.git(dir, ['show', `${rev}:${relPath}`])
+    return result.code === 0 ? result.stdout : undefined
+  }
+
   /** Run one confined git command in `dir`, collecting bounded stdout and stderr. */
   private async git(dir: string, args: readonly string[]): Promise<GitResult> {
     const value: unknown = this.ctx.get('subprocess')
