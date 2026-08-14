@@ -90,6 +90,14 @@ const JUDGE_SYSTEM = [
   '没有候选时输出 {"candidates":[]}。JSON 之外不要输出任何文字。',
 ].join('\n')
 
+/** The verifier's stable system instruction: compare candidates against real stored memories. */
+const VERIFY_SYSTEM = [
+  '你是记忆去重核实器。判断候选记忆是否与已有记忆重复：同主题即算重复，即使表述完全不同。',
+  '已有记忆以"标题｜内容摘要"列出，逐条对照候选。',
+  '只输出 JSON：{"candidates":[保留的候选原样条目]}（重复的移除）。',
+  '没有保留时输出 {"candidates":[]}。JSON 之外不要输出任何文字。',
+].join('\n')
+
 /** Per-session candidates awaiting presentation; cleared once presented. */
 const pendingCandidates = new WeakMap<Session, { turn: number; list: MemoryCandidate[] }>()
 /** Sessions with tool activity in the current turn, for the on-activity trigger. */
@@ -161,8 +169,8 @@ function resolveRoute(
   return undefined
 }
 
-/** Titles of every memory already on the session's ancestor chain (dedup guard for the judge). */
-async function existingMemoryTitles(
+/** Titles and content heads of every memory on the session's ancestor chain (dedup material). */
+async function existingMemorySummaries(
   memories: MemoryService,
   session: Session,
 ): Promise<string[]> {
@@ -170,10 +178,51 @@ async function existingMemoryTitles(
   if (cwd === undefined) return []
   try {
     const chain = await memories.loadChain(cwd)
-    return chain.flatMap(entry => entry.nodes.map(node => node.title))
+    return chain.flatMap(entry => entry.nodes.map((node) => {
+      const body = node.content.replace(/\s+/g, ' ').trim()
+      return `${node.title}｜${body.slice(0, 120)}`
+    }))
   } catch {
     return []
   }
+}
+
+/** One auxiliary LLM text call (judge or verifier). */
+async function llmText(
+  ctx: Context,
+  route: { provider: string; model: string },
+  session: Session,
+  system: string,
+  input: string,
+  maxTokens: number,
+  timeoutMs: number,
+): Promise<string> {
+  const messages: Message[] = [createUserMessage({
+    content: [{ type: 'text', text: input }],
+    source: { kind: 'plugin', plugin: 'dsh-memory-accumulate' },
+  })]
+  using callDeadline = deadline(new AbortController().signal, timeoutMs, 'MEMORY_ACCUMULATE_TIMEOUT')
+  const options: GenerateOptions = deepFreeze({
+    provider: route.provider,
+    model: route.model,
+    messages,
+    system,
+    maxTokens,
+    sessionId: session.id,
+    signal: callDeadline.signal,
+  })
+  const assembler = new BlockAssembler()
+  for await (const chunk of ctx.llm.stream(options)) {
+    callDeadline.signal.throwIfAborted()
+    assembler.push(chunk)
+  }
+  callDeadline.signal.throwIfAborted()
+  const terminalError = finishError(assembler.finish)
+  if (terminalError !== undefined) throw terminalError
+  return assembler.blocks()
+    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+    .map(block => block.text)
+    .join(' ')
 }
 
 function samePayload(left: UserMessage, right: UserMessage): boolean {
@@ -197,41 +246,32 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       const framed = frameMessages(session.deriveMessages().slice(-maxInputMessages))
       if (Buffer.byteLength(framed, 'utf8') > maxInputBytes) return
-      const messages: Message[] = [createUserMessage({
-        content: [{ type: 'text', text: framed }],
-        source: { kind: 'plugin', plugin: 'dsh-memory-accumulate' },
-      })]
-      // Existing memory titles go to the judge so it does not re-propose
-      // topics that are already stored — the duplicate-candidate cycle the
-      // agent kept having to reject by hand.
-      const existingTitles = await existingMemoryTitles(ctx.memories, session)
-      const system = existingTitles.length === 0
+      // Existing memory summaries go to the judge so it does not re-propose
+      // stored topics (first pass), and then to the verifier which compares
+      // the generated candidates against the real stored content (second
+      // pass) — title lists alone were not enough to stop duplicates.
+      const existing = await existingMemorySummaries(ctx.memories, session)
+      const judgeSystem = existing.length === 0
         ? JUDGE_SYSTEM
-        : `${JUDGE_SYSTEM}\n\n以下主题已存在于记忆库，不要重复提议：\n${existingTitles.join('\n')}`
-      using callDeadline = deadline(new AbortController().signal, timeoutMs, 'MEMORY_ACCUMULATE_TIMEOUT')
-      const options: GenerateOptions = deepFreeze({
-        provider: route.provider,
-        model: route.model,
-        messages,
-        system,
-        maxTokens: maxOutputTokens,
-        sessionId: session.id,
-        signal: callDeadline.signal,
-      })
-      const assembler = new BlockAssembler()
-      for await (const chunk of ctx.llm.stream(options)) {
-        callDeadline.signal.throwIfAborted()
-        assembler.push(chunk)
+        : `${JUDGE_SYSTEM}\n\n以下主题已存在于记忆库，不要重复提议：\n${existing.join('\n')}`
+      const list = parseCandidates(
+        await llmText(ctx, route, session, judgeSystem, framed, maxOutputTokens, timeoutMs),
+        maxCandidates,
+      )
+      if (list.length === 0) return
+      let verified = list
+      if (existing.length > 0) {
+        try {
+          const verifyInput = `候选记忆：\n${JSON.stringify(list)}\n\n已有记忆（标题｜内容摘要）：\n${existing.join('\n')}`
+          verified = parseCandidates(
+            await llmText(ctx, route, session, VERIFY_SYSTEM, verifyInput, maxOutputTokens, timeoutMs),
+            maxCandidates,
+          )
+        } catch (error) {
+          ctx.logger.warn('memory-accumulate: verification failed, keeping unverified candidates: %o', error)
+        }
       }
-      callDeadline.signal.throwIfAborted()
-      const terminalError = finishError(assembler.finish)
-      if (terminalError !== undefined) throw terminalError
-      const text = assembler.blocks()
-        .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
-        .map(block => block.text)
-        .join(' ')
-      const list = parseCandidates(text, maxCandidates)
-      if (list.length > 0) pendingCandidates.set(session, { turn, list })
+      if (verified.length > 0) pendingCandidates.set(session, { turn, list: verified })
     } catch (error) {
       ctx.logger.warn('memory-accumulate: judgment failed: %o', error)
     }

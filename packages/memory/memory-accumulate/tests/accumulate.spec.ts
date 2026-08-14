@@ -29,10 +29,10 @@ function tempRoot(label: string): string {
   return root
 }
 
-/** Minimal scripted adapter: records requests, answers from a fixed chunk list. */
+/** Minimal scripted adapter: each model call consumes the next script entry. */
 class FakeAdapter extends LlmAdapter {
   requests: GenerateOptions[] = []
-  constructor(private readonly chunks: StreamChunk[] | 'fail') {
+  constructor(private readonly script: (StreamChunk[] | 'fail')[]) {
     super()
   }
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -40,8 +40,10 @@ class FakeAdapter extends LlmAdapter {
   }
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
-    if (this.chunks === 'fail') throw new Error('adapter exploded')
-    for (const chunk of this.chunks) {
+    const entry = this.script.shift()
+    if (entry === undefined) throw new Error('adapter script exhausted')
+    if (entry === 'fail') throw new Error('adapter exploded')
+    for (const chunk of entry) {
       if (options.signal?.aborted) throw new Error('aborted')
       yield chunk
     }
@@ -143,9 +145,9 @@ const userPrompt = createUserMessage({
 
 describe('the memory accumulation plugin', () => {
   it('judges an active turn and presents candidates at the next step', async () => {
-    const { ctx, adapter } = await liveContext(new FakeAdapter(textChunks(
-      JSON.stringify({ candidates: [{ title: '修复了 ENOENT', content: 'store 目录缺失导致 spawn 失败' }] }),
-    )))
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      textChunks(JSON.stringify({ candidates: [{ title: '修复了 ENOENT', content: 'store 目录缺失导致 spawn 失败' }] })),
+    ]))
     const agent = stubAgent()
     toolResult(ctx, agent)
     endTurn(ctx, agent, 1)
@@ -160,7 +162,7 @@ describe('the memory accumulation plugin', () => {
   })
 
   it('skips judgment for turns without tool activity under on-activity', async () => {
-    const { ctx, adapter } = await liveContext(new FakeAdapter(textChunks('{"candidates":[]}')))
+    const { ctx, adapter } = await liveContext(new FakeAdapter([textChunks('{"candidates":[]}')]))
     const agent = stubAgent()
     endTurn(ctx, agent, 1)
     await new Promise(resolve => setTimeout(resolve, 50))
@@ -169,7 +171,7 @@ describe('the memory accumulation plugin', () => {
 
   it('judges every turn under always', async () => {
     const { ctx, adapter } = await liveContext(
-      new FakeAdapter(textChunks('{"candidates":[]}')),
+      new FakeAdapter([textChunks('{"candidates":[]}')]),
       { trigger: 'always' },
     )
     const agent = stubAgent()
@@ -178,7 +180,7 @@ describe('the memory accumulation plugin', () => {
   })
 
   it('does not present when the judge finds no candidates', async () => {
-    const { ctx, adapter } = await liveContext(new FakeAdapter(textChunks('{"candidates":[]}')))
+    const { ctx, adapter } = await liveContext(new FakeAdapter([textChunks('{"candidates":[]}')]))
     const agent = stubAgent()
     toolResult(ctx, agent)
     endTurn(ctx, agent, 1)
@@ -189,9 +191,9 @@ describe('the memory accumulation plugin', () => {
   })
 
   it('presents candidates only once', async () => {
-    const { ctx, adapter } = await liveContext(new FakeAdapter(textChunks(
-      JSON.stringify({ candidates: [{ title: '一次性的', content: '只提示一次' }] }),
-    )))
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      textChunks(JSON.stringify({ candidates: [{ title: '一次性的', content: '只提示一次' }] })),
+    ]))
     const agent = stubAgent()
     toolResult(ctx, agent)
     endTurn(ctx, agent, 1)
@@ -204,7 +206,7 @@ describe('the memory accumulation plugin', () => {
   })
 
   it('stays silent when the judge call fails', async () => {
-    const { ctx, adapter } = await liveContext(new FakeAdapter('fail'))
+    const { ctx, adapter } = await liveContext(new FakeAdapter(['fail']))
     const agent = stubAgent()
     toolResult(ctx, agent)
     endTurn(ctx, agent, 1)
@@ -214,8 +216,8 @@ describe('the memory accumulation plugin', () => {
     expect(accumulateMessages(decision)).toEqual([])
   })
 
-  it('feeds existing memory titles to the judge so topics are not re-proposed', async () => {
-    const { ctx, adapter } = await liveContext(new FakeAdapter(textChunks('{"candidates":[]}')))
+  it('feeds existing memory summaries to the judge so topics are not re-proposed', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([textChunks('{"candidates":[]}')]))
     const workspace = join(tempRoot('dedup'), 'ws')
     await ctx.memories.remember('workspace', workspace, {
       id: 'design/rin-handoff', title: '会话交接机制设计', content: 'x',
@@ -226,6 +228,32 @@ describe('the memory accumulation plugin', () => {
     await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
     expect(adapter.requests[0]?.system).toContain('会话交接机制设计')
     expect(adapter.requests[0]?.system).toContain('不要重复提议')
+  })
+
+  it('verifies candidates against stored memories before presenting', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      // first call: the judge still proposes a duplicate (and one fresh topic)
+      textChunks(JSON.stringify({ candidates: [
+        { title: '重复主题', content: '和已有记忆同主题' },
+        { title: '全新主题', content: '真正的新结论' },
+      ] })),
+      // second call: the verifier drops the duplicate
+      textChunks(JSON.stringify({ candidates: [{ title: '全新主题', content: '真正的新结论' }] })),
+    ]))
+    const workspace = join(tempRoot('verify'), 'ws')
+    await ctx.memories.remember('workspace', workspace, {
+      id: 'design/rin-handoff', title: '会话交接机制设计', content: '同主题内容',
+    })
+    const agent = stubAgent(workspace)
+    toolResult(ctx, agent)
+    endTurn(ctx, agent, 1)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(2) })
+
+    const decision = await stepDecision(ctx, agent, [userPrompt])
+    const [injected] = accumulateMessages(decision)
+    expect(injected).toBeDefined()
+    expect(injected?.text).toContain('全新主题')
+    expect(injected?.text).not.toContain('重复主题')
   })
 
   it('parseCandidates tolerates fences, stray prose, and garbage', () => {
