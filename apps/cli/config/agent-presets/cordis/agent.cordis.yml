@@ -260,3 +260,23 @@
 
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'
+
+# ── Rin memory ──────────────────────────────────────────────────────────────
+#
+# The memory service (`ctx.memories`) lives on the HOST plane (base bundle);
+# this group only mounts the model-facing consumers — the `memory` tool, the
+# catalogue injection, and the turn-end accumulation.
+- id: memory
+  name: cordis:group
+  group: true
+  isolate:
+    memories: true
+  config:
+    - id: tool-memory
+      name: '@deepseek-ai/dsh-tool-memory'
+
+    - id: memory-context
+      name: '@deepseek-ai/dsh-memory-context'
+
+    - id: memory-accumulate
+      name: '@deepseek-ai/dsh-memory-accumulate'

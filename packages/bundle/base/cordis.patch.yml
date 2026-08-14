@@ -163,6 +163,12 @@
     - id: subprocess
       name: '@deepseek-ai/dsh-subprocess-local'
 
+    # The Rin memory service: a process-wide singleton so every session shares
+    # one store view. Agent presets decide whether to expose the model-facing
+    # consumers (tool-memory, memory-context, memory-accumulate).
+    - id: dsh-memory
+      name: '@deepseek-ai/dsh-memory'
+
     # Every shipped CLI mode starts with the same file-effect boundary.
     # The environment remains an explicit deployment override; otherwise fresh
     # sessions pin workspace-write + ask through the permission service below.
