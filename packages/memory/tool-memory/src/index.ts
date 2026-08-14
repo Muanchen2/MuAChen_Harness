@@ -28,11 +28,14 @@ export const Config: Schema<Config> = z.object({
   sectionOrder: z.number().default(115),
 })
 
-const MEMORY_GUIDANCE = 'Use memory tools to persist and recall cross-session project experience, '
-  + 'distinct from skills (methods). Before a long task, recall the relevant workspace memory to '
-  + 'restore prior conclusions and current state. After reaching a meaningful conclusion, a changed '
-  + 'position, or a learned path, remember it so a future session can resume without repeating work. '
-  + 'Keep memories factual and concise; store methods in skills, experience in memory.'
+const MEMORY_GUIDANCE = '使用 memory 工具持久化与回顾跨会话的项目经验，区别于 skills（方法）：'
+  + 'skills 存"怎么做"，memory 存"发生了什么、结论、当前状态"。记忆存储在 git 底座的 Rin 仓库：'
+  + 'workspace 作用域存于当前项目旁，central 作用域跨项目共享；每个会话的第一轮会自动注入相关记忆，'
+  + '因此现在记录的经验在未来会话中自动可见。开始长任务前，先用 memory list/read 回顾相关记忆，'
+  + '恢复之前的结论与状态。写入前先查重：用 memory list 查看是否已有同主题记忆；有则用相同 id 更新'
+  + '（保留演进历史），避免同主题散成多条互相矛盾的记忆。在达成有意义的结论后立即 remember：修好了'
+  + '一个 bug、做出了架构决策、解决了一个坑、学到了环境或工具路径、或者改变了立场。记忆保持事实性'
+  + '与简洁；可复用的方法存入 skills，经验存入 memory。'
 
 const OUTPUT = {
   schema: {
@@ -58,7 +61,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     description: 'Persist or recall cross-session project experience (memory), distinct from skills (methods).',
     parameters: {
       action: { type: 'string', required: true, enum: ['remember', 'read', 'list', 'timeline'] },
-      scope: { type: 'string', required: true, enum: ['workspace', 'central'] },
+      scope: { type: 'string', required: true, enum: ['workspace', 'central', 'chain'] },
       id: { type: 'string', description: 'Memory node id for read/timeline, or the id to save under for remember.' },
       title: { type: 'string', description: 'Title for remember; the new memory heading.' },
       content: { type: 'string', description: 'Body for remember; the experience to persist.' },
@@ -77,31 +80,56 @@ export function apply(ctx: Context, config: Config = {}): void {
 async function renderMemory(
   memories: MemoryService,
   cwd: string | undefined,
-  args: { action: string; scope: 'workspace' | 'central'; id?: string; title?: string; content?: string; message?: string },
+  args: { action: string; scope: 'workspace' | 'central' | 'chain'; id?: string; title?: string; content?: string; message?: string },
 ): Promise<string> {
   const scope = args.scope
   const workspace = scope === 'workspace' ? cwd : undefined
   switch (args.action) {
     case 'remember': {
+      if (scope === 'chain') return 'memory:remember requires workspace or central scope'
       const id = args.id ?? slug(args.title) ?? `memory-${Date.now()}`
       const title = args.title ?? id
       const content = args.content ?? ''
       const result = await memories.remember(scope, workspace, {
         id, title, content, ...args.message === undefined ? {} : { message: args.message },
       })
-      return renderNode(result.node, result.timeline)
+      const text = renderNode(result.node, result.timeline)
+      const similar = similarIds(await memories.list(scope, workspace), id)
+      return similar.length === 0
+        ? text
+        : `${text}\n\n同目录下已有记忆（同主题请用相同 id 更新而非新建）：\n${similar.map(s => `- ${s}`).join('\n')}`
     }
     case 'read': {
       if (args.id === undefined) return 'memory:read requires an id'
+      if (scope === 'chain') {
+        if (cwd === undefined) return 'memory:chain requires a session workspace'
+        const found = await memories.readChain(cwd, args.id)
+        return found === undefined
+          ? `no memory "${args.id}" on the ancestor chain`
+          : `store: ${found.store}\n${renderNode(found.node, found.timeline)}`
+      }
       const found = await memories.read(scope, workspace, args.id)
       return found === undefined ? `no memory "${args.id}" in ${scope} store` : renderNode(found.node, found.timeline)
     }
     case 'list': {
+      if (scope === 'chain') {
+        if (cwd === undefined) return 'memory:chain requires a session workspace'
+        const chain = await memories.listChain(cwd)
+        if (chain.length === 0) return 'no memories on the ancestor chain'
+        return chain.map(entry => `${entry.store}\n${entry.ids.join('\n')}`).join('\n\n')
+      }
       const ids = await memories.list(scope, workspace)
       return ids.length === 0 ? `no memories in ${scope} store` : ids.join('\n')
     }
     case 'timeline': {
       if (args.id === undefined) return 'memory:timeline requires an id'
+      if (scope === 'chain') {
+        if (cwd === undefined) return 'memory:chain requires a session workspace'
+        const found = await memories.readChain(cwd, args.id)
+        return found === undefined
+          ? `no timeline for memory "${args.id}"`
+          : found.timeline.map(entry => `${entry.at} ${entry.action} ${entry.revision} ${entry.message}`).join('\n')
+      }
       const timeline = await memories.timeline(scope, workspace, args.id)
       return timeline.length === 0
         ? `no timeline for memory "${args.id}"`
@@ -130,4 +158,20 @@ function slug(value: string | undefined): string | undefined {
   if (value === undefined) return undefined
   const slugged = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
   return slugged === '' ? undefined : slugged
+}
+
+/**
+ * Ids sharing `id`'s exact parent path (excluding `id` itself), sorted.
+ * Root-level ids match other root-level ids; a nested id only matches ids in
+ * its own directory, never descendants.
+ */
+export function similarIds(ids: readonly string[], id: string): string[] {
+  const parent = id.includes('/') ? id.slice(0, id.lastIndexOf('/')) : ''
+  return ids
+    .filter((other) => {
+      if (other === id) return false
+      const otherParent = other.includes('/') ? other.slice(0, other.lastIndexOf('/')) : ''
+      return otherParent === parent
+    })
+    .sort()
 }
