@@ -44,7 +44,10 @@ const MEMORY_GUIDANCE = '使用 memory 工具持久化与回顾跨会话的项�
   + '分支名只允许小写字母、数字、连字符，多级用 / 分隔（如 task-x/attempt-a，不允许大写、下划线、'
   + '空格或中文）；方案确认后用 memory merge 合并回主线；merge 冲突时先 read 两边内容，整合成综合'
   + '结论更新到目标节点后再重试。**任务未完成需要交接时，写 handoff/<任务名> 交接单（结构：目标/进度/'
-  + '下一步/遗留坑/相关文件）。记忆保持事实性与简洁；可复用的方法存入 skills，经验存入 memory。'
+  + '下一步/遗留坑/相关文件）。**记忆维护：被推翻或过时的结论用 memory archive 归档（移入 archive/，'
+  + '不再注入和列出，可 memory read archive/<id> 或 memory list archive/ 找回，memory unarchive 恢复）；'
+  + '误写、测试或临时记录用 memory remove 彻底删除（git 历史仍可追溯）。记忆保持事实性与简洁；'
+  + '可复用的方法存入 skills，经验存入 memory。'
 
 const OUTPUT = {
   schema: {
@@ -69,13 +72,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     name: 'memory',
     description: 'Persist or recall cross-session project experience (memory), distinct from skills (methods).',
     parameters: {
-      action: { type: 'string', required: true, enum: ['remember', 'read', 'list', 'timeline', 'branch', 'checkout', 'current-branch', 'list-branches', 'merge'] },
+      action: { type: 'string', required: true, enum: ['remember', 'read', 'list', 'timeline', 'branch', 'checkout', 'current-branch', 'list-branches', 'merge', 'remove', 'archive', 'unarchive'] },
       scope: { type: 'string', required: true, enum: ['workspace', 'central', 'chain'] },
       id: { type: 'string', description: 'Memory node id for read/timeline, or the id to save under for remember.' },
       title: { type: 'string', description: 'Title for remember; the new memory heading.' },
       content: { type: 'string', description: 'Body for remember; the experience to persist.' },
       message: { type: 'string', description: 'Optional one-line commit note for this change.' },
       strategy: { type: 'string', description: 'Conflict resolution for merge: ours (keep target) or theirs (keep merged).' },
+      prefix: { type: 'string', description: 'Optional id prefix filter for list (e.g. archive/ to browse the archive, handoff/ for handoff memos).' },
     },
     output: OUTPUT,
     execute(args, exec) {
@@ -90,7 +94,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 async function renderMemory(
   memories: MemoryService,
   cwd: string | undefined,
-  args: { action: string; scope: 'workspace' | 'central' | 'chain'; id?: string; title?: string; content?: string; message?: string; strategy?: string },
+  args: { action: string; scope: 'workspace' | 'central' | 'chain'; id?: string; title?: string; content?: string; message?: string; strategy?: string; prefix?: string },
 ): Promise<string> {
   const scope = args.scope
   const workspace = scope === 'workspace' ? cwd : undefined
@@ -179,8 +183,26 @@ async function renderMemory(
         if (chain.length === 0) return 'no memories on the ancestor chain'
         return chain.map(entry => `${entry.store}\n${entry.ids.join('\n')}`).join('\n\n')
       }
-      const ids = await memories.list(scope, workspace)
+      const ids = await memories.list(scope, workspace, args.prefix)
       return ids.length === 0 ? `no memories in ${scope} store` : ids.join('\n')
+    }
+    case 'remove': {
+      if (scope === 'chain') return 'memory:remove requires workspace or central scope'
+      if (args.id === undefined) return 'memory:remove requires an id'
+      await memories.remove(scope, workspace, args.id)
+      return `removed memory ${args.id}`
+    }
+    case 'archive': {
+      if (scope === 'chain') return 'memory:archive requires workspace or central scope'
+      if (args.id === undefined) return 'memory:archive requires an id'
+      const result = await memories.archive(scope, workspace, args.id)
+      return `archived memory ${args.id} as ${result.id} (hidden from listings; use memory read ${result.id} or memory list archive/ to see it again)`
+    }
+    case 'unarchive': {
+      if (scope === 'chain') return 'memory:unarchive requires workspace or central scope'
+      if (args.id === undefined) return 'memory:unarchive requires an id'
+      const result = await memories.unarchive(scope, workspace, args.id)
+      return `restored memory ${args.id} to ${result.id}`
     }
     case 'timeline': {
       if (args.id === undefined) return 'memory:timeline requires an id'

@@ -143,7 +143,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     const sections: RenderSection[] = chain.map(entry => ({
       label: entry.scope === 'central' ? CENTRAL_LABEL : chainLabel(cwd, entry.store),
       store: entry.store,
-      nodes: entry.nodes.map(node => ({ id: node.id, title: node.title })),
+      // Archived nodes stay out of the injected catalogue: they are shelf
+      // material, readable on demand via memory read archive/<id>.
+      nodes: entry.nodes
+        .filter(node => !node.id.startsWith('archive/'))
+        .map(node => ({ id: node.id, title: node.title })),
     }))
     if (sections.every(section => section.nodes.length === 0)) return undefined
     const catalogue = renderBounded(sections, maxBytes)

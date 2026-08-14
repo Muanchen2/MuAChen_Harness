@@ -128,12 +128,16 @@ export class MemoryService extends Service {
    * List the current memory node ids in a store.
    * @param scope - which store to scan.
    * @param workspace - workspace path (used only for `scope: 'workspace'`).
-   * @returns the sorted list of node ids (`*.md` basenames in the store root).
+   * @param prefix - optional id prefix filter; when omitted, archived nodes
+   *   (`archive/…`) are hidden so the active catalogue stays lean.
+   * @returns the sorted list of matching node ids.
    */
-  async list(scope: MemoryScope, workspace: string | undefined): Promise<string[]> {
+  async list(scope: MemoryScope, workspace: string | undefined, prefix?: string): Promise<string[]> {
     const dir = await this.resolveStore(scope, workspace)
     if (!(await this.git.hasCommits(dir))) return []
-    return this.listMarkdownIds(dir)
+    const ids = await this.listMarkdownIds(dir)
+    if (prefix === undefined) return ids.filter(id => !id.startsWith('archive/'))
+    return ids.filter(id => id.startsWith(prefix))
   }
 
   /**
@@ -402,6 +406,73 @@ export class MemoryService extends Service {
     }
     await this.git.abortMerge(dir)
     return { merged: [], conflicts }
+  }
+
+  /**
+   * Permanently delete a node from a store, committed so the removal is
+   * recorded and revertable through git history.
+   * @param scope - which store to remove from.
+   * @param workspace - workspace path (used only for `scope: 'workspace'`).
+   * @param id - the memory node id.
+   * @throws when the node does not exist.
+   */
+  async remove(scope: MemoryScope, workspace: string | undefined, id: string): Promise<void> {
+    const dir = await this.resolveStore(scope, workspace)
+    const relPath = nodePath(id)
+    if (await this.git.readFile(dir, relPath) === undefined) {
+      throw new Error(`memory: no memory "${id}" to remove`)
+    }
+    const fs = await import('node:fs/promises')
+    await fs.rm(join(dir, relPath))
+    await this.git.commit(dir, `memory: remove ${id}`)
+  }
+
+  /**
+   * Move a node out of the active catalogue into `archive/<id>`, committed.
+   * Archived nodes are hidden from listings and context injection but remain
+   * readable as `archive/<id>` and restorable via `unarchive`.
+   * @param scope - which store to archive in.
+   * @param workspace - workspace path (used only for `scope: 'workspace'`).
+   * @param id - the memory node id.
+   * @returns the archived id (`archive/<id>`).
+   * @throws when the node does not exist.
+   */
+  async archive(scope: MemoryScope, workspace: string | undefined, id: string): Promise<{ id: string }> {
+    const dir = await this.resolveStore(scope, workspace)
+    const relPath = nodePath(id)
+    if (await this.git.readFile(dir, relPath) === undefined) {
+      throw new Error(`memory: no memory "${id}" to archive`)
+    }
+    const archivedId = `archive/${id}`
+    const fs = await import('node:fs/promises')
+    await fs.mkdir(dirname(join(dir, nodePath(archivedId))), { recursive: true })
+    await fs.rename(join(dir, relPath), join(dir, nodePath(archivedId)))
+    await this.git.commit(dir, `memory: archive ${id}`)
+    return { id: archivedId }
+  }
+
+  /**
+   * Restore an archived node back to its original id, committed. Accepts the
+   * archived id (`archive/<id>`) or the bare original id.
+   * @param scope - which store to restore in.
+   * @param workspace - workspace path (used only for `scope: 'workspace'`).
+   * @param id - the archived (or original) node id.
+   * @returns the restored id.
+   * @throws when no archived node exists for that id.
+   */
+  async unarchive(scope: MemoryScope, workspace: string | undefined, id: string): Promise<{ id: string }> {
+    const dir = await this.resolveStore(scope, workspace)
+    const archived = id.startsWith('archive/') ? id : `archive/${id}`
+    const relPath = nodePath(archived)
+    if (await this.git.readFile(dir, relPath) === undefined) {
+      throw new Error(`memory: no archived memory "${id}" to restore`)
+    }
+    const original = archived.slice('archive/'.length)
+    const fs = await import('node:fs/promises')
+    await fs.mkdir(dirname(join(dir, nodePath(original))), { recursive: true })
+    await fs.rename(join(dir, relPath), join(dir, nodePath(original)))
+    await this.git.commit(dir, `memory: unarchive ${original}`)
+    return { id: original }
   }
 }
 

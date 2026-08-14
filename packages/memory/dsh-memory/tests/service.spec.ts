@@ -309,6 +309,64 @@ describe('the memory service over a git-backed store', () => {
     expect(await memories.currentBranch('workspace', workspace)).toBe('task-x/attempt-a')
   })
 
+  it('removes a node permanently while keeping its history', async () => {
+    const root = tempRoot('remove-node')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'v1' })
+    await memories.remember('workspace', workspace, { id: 'keep/me', title: 'Keep', content: 'v1' })
+
+    await memories.remove('workspace', workspace, 'design/x')
+
+    expect(await memories.read('workspace', workspace, 'design/x')).toBeUndefined()
+    expect(await memories.list('workspace', workspace)).toEqual(['keep/me'])
+    // the removal itself is a committed, revertable change
+    expect((await memories.timeline('workspace', workspace, 'design/x')).map(entry => entry.message))
+      .toContain('memory: remove design/x')
+  })
+
+  it('removing a missing node throws without touching the store', async () => {
+    const root = tempRoot('remove-missing')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'alpha', title: 'Alpha', content: 'v1' })
+    await expect(memories.remove('workspace', workspace, 'nope')).rejects.toThrow(/no memory "nope" to remove/)
+    expect(await memories.list('workspace', workspace)).toEqual(['alpha'])
+  })
+
+  it('archives a node out of the active listing and restores it on unarchive', async () => {
+    const root = tempRoot('archive-node')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'superseded' })
+
+    const archived = await memories.archive('workspace', workspace, 'design/x')
+    expect(archived.id).toBe('archive/design/x')
+    // hidden from the active catalogue, still readable and listed under the prefix
+    expect(await memories.list('workspace', workspace)).toEqual([])
+    expect(await memories.list('workspace', workspace, 'archive/')).toEqual(['archive/design/x'])
+    expect((await memories.read('workspace', workspace, 'archive/design/x'))?.node.content).toBe('superseded')
+    // timeline survives the move
+    expect((await memories.timeline('workspace', workspace, 'archive/design/x')).length).toBeGreaterThan(0)
+
+    const restored = await memories.unarchive('workspace', workspace, 'archive/design/x')
+    expect(restored.id).toBe('design/x')
+    expect(await memories.list('workspace', workspace)).toEqual(['design/x'])
+    expect((await memories.read('workspace', workspace, 'design/x'))?.node.content).toBe('superseded')
+  })
+
+  it('unarchive accepts the bare id and rejects missing archives', async () => {
+    const root = tempRoot('unarchive-missing')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'v1' })
+    await memories.archive('workspace', workspace, 'design/x')
+
+    await expect(memories.unarchive('workspace', workspace, 'nope')).rejects.toThrow(/no archived memory "nope" to restore/)
+    expect((await memories.unarchive('workspace', workspace, 'design/x')).id).toBe('design/x')
+    expect(await memories.read('workspace', workspace, 'design/x')).toBeDefined()
+  })
+
   it('merges a branch cleanly and reports the brought-in nodes', async () => {
     const root = tempRoot('merge-clean')
     const workspace = join(root, 'ws')

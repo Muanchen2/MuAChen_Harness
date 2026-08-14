@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
-import MemoryService from '@deepseek-ai/dsh-memory'
+import MemoryService from '../../dsh-memory/src/index.ts'
 import { agentEvents, Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
@@ -309,5 +309,21 @@ describe('the memory context injection', () => {
     expect(injected?.text).toContain('未完成任务交接单')
     expect(injected?.text).toContain('（handoff/）：handoff/pending-y')
     expect(injected?.text).not.toContain('（handoff/）：handoff/done-x')
+  })
+
+  it('skips archived nodes in the injected catalogue', async () => {
+    const root = tempRoot('archive-skip')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'design/x', title: '过时方案', content: '已被推翻' })
+    await memories.remember('workspace', workspace, { id: 'design/y', title: '现行方案', content: '在用' })
+    await memories.archive('workspace', workspace, 'design/x')
+
+    const decision = await foldedDecision(ctx, stubAgent(workspace))
+    const injected = memoryMessages(decision)[0]
+    expect(injected).toBeDefined()
+    expect(injected?.text).toContain('- [design/y] 现行方案')
+    expect(injected?.text).not.toContain('过时方案')
+    expect(injected?.text).not.toContain('archive/design/x')
   })
 })
