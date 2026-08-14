@@ -12,6 +12,8 @@ Skills are methods — how to do something, stable and reusable. Memories are ex
 
 - `remember(scope, workspace, { id, title, content, message? })` — Write one memory node, committing the change to the store. Returns the node and its new timeline.
 - `read(scope, workspace, id)` — Load a node plus its timeline, or `undefined` when absent.
+- `search(scope, workspace, query)` — Case-insensitive literal full-text search over node bodies and headings, ranked by match count; archived nodes are excluded. Returns up to 10 hits with a first-match snippet.
+- `searchChain(workspace, query)` — The same search over every store on the ancestor chain plus the central store, one entry per store with hits.
 - `list(scope, workspace, prefix?)` — The sorted memory ids in a store, scanned recursively; without a `prefix`, archived ids (`archive/…`) are hidden.
 - `timeline(scope, workspace, id)` — The node's complete per-file change history, newest first. The earliest commit is `created`, later commits `updated`; every entry carries its backing git `revision`, so future revert/diff operations can address it. Renames are followed (`git log --follow`), so a node moved into a hierarchy keeps its pre-move history.
 - `remove(scope, workspace, id)` — Permanently delete a node (committed; revertable through git history). Throws when the node is absent.
@@ -59,6 +61,7 @@ None — the service owns no durable session log.
 
 - **Git as the memory substrate.** Each store is a git repository operated through `ctx.subprocess` (never raw `node:child_process`), so writes are commits: recorded, revertable, and branchable. The service layers memory-node structure and timeline on top.
 - **Skill/memory separation.** Methods belong in skills; experience belongs here. See the model-facing consumer.
+- **Writes are serialized.** The memory service is a host singleton shared by every session; a write (file change plus its commit) runs atomically through a module-wide queue so parallel sessions cannot interleave their staging. A git call that still collides on `index.lock` — the cross-process case — is retried with short backoff.
 
 ## Model Experience
 

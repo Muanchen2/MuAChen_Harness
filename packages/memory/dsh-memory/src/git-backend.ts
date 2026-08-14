@@ -21,6 +21,9 @@ import { join } from 'node:path'
 /** Buffer cap for collected git output — commit/log output is small. */
 const MAX_OUTPUT_BYTES = 64 * 1024
 
+/** How many times a git call colliding on `index.lock` is retried, with backoff. */
+const INDEX_LOCK_RETRIES = 3
+
 /**
  * One captured git invocation result.
  * @param code - process exit code (null only for a signal kill).
@@ -224,8 +227,37 @@ export class GitBackend {
     return result.code === 0 ? result.stdout : undefined
   }
 
-  /** Run one confined git command in `dir`, collecting bounded stdout and stderr. */
+  /**
+   * Case-insensitive fixed-string search over the store's tracked `*.md`
+   * files. The pattern is passed via `-e`, so a query starting with `-`
+   * cannot be read as an option.
+   * @param dir - the memory store directory.
+   * @param query - the literal text to find.
+   * @returns matching lines in `path:lineno:line` form, unsorted.
+   */
+  async grep(dir: string, query: string): Promise<string[]> {
+    const result = await this.git(dir, ['grep', '-n', '-i', '-F', '-e', query, '--', '*.md'])
+    if (result.code !== 0 || result.stdout === '') return []
+    return result.stdout.split('\n').filter(line => line !== '')
+  }
+
+  /**
+   * Run one confined git command in `dir`, collecting bounded stdout and
+   * stderr. A call that collides on git's `index.lock` (another process owns
+   * the index momentarily) is retried with short backoff — same-process
+   * writes are serialized by the service, this covers cross-process races.
+   */
   private async git(dir: string, args: readonly string[]): Promise<GitResult> {
+    let result = await this.spawnGit(dir, args)
+    for (let attempt = 1; attempt <= INDEX_LOCK_RETRIES && isIndexLockCollision(result); attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 25 * attempt))
+      result = await this.spawnGit(dir, args)
+    }
+    return result
+  }
+
+  /** One confined git spawn, without retry. */
+  private async spawnGit(dir: string, args: readonly string[]): Promise<GitResult> {
     const value: unknown = this.ctx.get('subprocess')
     const subprocess = value as SubprocessRuntime | undefined
     if (subprocess === undefined) {
@@ -256,4 +288,9 @@ export class GitBackend {
     const fs = await import('node:fs/promises')
     await fs.mkdir(dir, { recursive: true })
   }
+}
+
+/** Whether a failed git call collided on the index lock file. */
+function isIndexLockCollision(result: GitResult): boolean {
+  return result.code !== 0 && result.stderr.includes('index.lock')
 }

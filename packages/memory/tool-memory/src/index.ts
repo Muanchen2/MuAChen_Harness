@@ -72,9 +72,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     name: 'memory',
     description: 'Persist or recall cross-session project experience (memory), distinct from skills (methods).',
     parameters: {
-      action: { type: 'string', required: true, enum: ['remember', 'read', 'list', 'timeline', 'branch', 'checkout', 'current-branch', 'list-branches', 'merge', 'remove', 'archive', 'unarchive'] },
+      action: { type: 'string', required: true, enum: ['remember', 'read', 'list', 'search', 'timeline', 'branch', 'checkout', 'current-branch', 'list-branches', 'merge', 'remove', 'archive', 'unarchive'] },
       scope: { type: 'string', required: true, enum: ['workspace', 'central', 'chain'] },
       id: { type: 'string', description: 'Memory node id for read/timeline, or the id to save under for remember.' },
+      query: { type: 'string', description: 'Full-text search query for memory search (case-insensitive literal match over node bodies).' },
       title: { type: 'string', description: 'Title for remember; the new memory heading.' },
       content: { type: 'string', description: 'Body for remember; the experience to persist.' },
       message: { type: 'string', description: 'Optional one-line commit note for this change.' },
@@ -94,7 +95,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 async function renderMemory(
   memories: MemoryService,
   cwd: string | undefined,
-  args: { action: string; scope: 'workspace' | 'central' | 'chain'; id?: string; title?: string; content?: string; message?: string; strategy?: string; prefix?: string },
+  args: { action: string; scope: 'workspace' | 'central' | 'chain'; id?: string; query?: string; title?: string; content?: string; message?: string; strategy?: string; prefix?: string },
 ): Promise<string> {
   const scope = args.scope
   const workspace = scope === 'workspace' ? cwd : undefined
@@ -186,6 +187,19 @@ async function renderMemory(
       const ids = await memories.list(scope, workspace, args.prefix)
       return ids.length === 0 ? `no memories in ${scope} store` : ids.join('\n')
     }
+    case 'search': {
+      if (args.query === undefined || args.query === '') return 'memory:search requires a query'
+      if (scope === 'chain') {
+        if (cwd === undefined) return 'memory:chain requires a session workspace'
+        const chain = await memories.searchChain(cwd, args.query)
+        if (chain.length === 0) return `no memories matching "${args.query}" on the ancestor chain`
+        return chain.map(entry => `${entry.store}\n${renderHits(entry.hits)}`).join('\n\n')
+      }
+      const hits = await memories.search(scope, workspace, args.query)
+      return hits.length === 0
+        ? `no memories matching "${args.query}" in ${scope} store`
+        : renderHits(hits)
+    }
     case 'remove': {
       if (scope === 'chain') return 'memory:remove requires workspace or central scope'
       if (args.id === undefined) return 'memory:remove requires an id'
@@ -234,6 +248,11 @@ function renderNode(
     for (const entry of timeline) lines.push(`- ${entry.at} ${entry.action} ${entry.revision} ${entry.message}`)
   }
   return lines.join('\n')
+}
+
+/** Render search hits with their first matching line as a compact list. */
+function renderHits(hits: { id: string; title: string; snippet: string; matchCount: number }[]): string {
+  return hits.map(hit => `${hit.id} (${hit.matchCount} 处匹配)\n  ${hit.snippet.slice(0, 120)}`).join('\n')
 }
 
 /** Derive a safe memory id from a title by kebab-casing and trimming. */

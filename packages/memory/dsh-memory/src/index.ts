@@ -30,9 +30,13 @@ import type {
   MemoryWriteResult,
   MergeConflict,
   MergeResult,
+  SearchHit,
 } from './types.ts'
 
-export type { ChainContent, ChainStore, MergeConflict, MergeResult } from './types.ts'
+export type { ChainContent, ChainStore, MergeConflict, MergeResult, SearchHit } from './types.ts'
+
+/** How many search hits one query returns, best match first. */
+const SEARCH_MAX_HITS = 10
 
 /**
  * Branch names are restricted to kebab-case segments joined by `/` (e.g.
@@ -48,6 +52,20 @@ export function branchNameError(name: string): string | undefined {
     return `memory:branch name "${name}" is invalid — use lowercase letters, digits, and hyphens (segments joined by /), e.g. task-x/attempt-a`
   }
   return undefined
+}
+
+/**
+ * Serialize one store write across every session sharing this module. The
+ * memory service is a host singleton; concurrent writes from parallel
+ * sessions would interleave their file writes and `git add -A` staging, so a
+ * write (file change plus its commit) must run atomically. Reads stay
+ * concurrent.
+ */
+let writeTail: Promise<void> = Promise.resolve()
+function serializeWrite<T>(task: () => Promise<T>): Promise<T> {
+  const run = writeTail.then(task, task)
+  writeTail = run.then(() => undefined, () => undefined)
+  return run
 }
 
 /** Config for the memory service. Storage roots are directory locations for each store scope. */
@@ -94,14 +112,16 @@ export class MemoryService extends Service {
     workspace: string | undefined,
     input: { id: string; title: string; content: string; message?: string },
   ): Promise<MemoryWriteResult> {
-    const dir = await this.resolveStore(scope, workspace)
-    const relPath = nodePath(input.id)
-    await writeUtf8(join(dir, relPath), `# ${input.title}\n\n${input.content}\n`)
-    await this.git.commit(dir, input.message ?? `memory: ${input.title}`)
-    return {
-      node: { id: input.id, title: input.title, content: input.content, scope, branch: 'default' },
-      timeline: await this.timeline(scope, workspace, input.id),
-    }
+    return serializeWrite(async () => {
+      const dir = await this.resolveStore(scope, workspace)
+      const relPath = nodePath(input.id)
+      await writeUtf8(join(dir, relPath), `# ${input.title}\n\n${input.content}\n`)
+      await this.git.commit(dir, input.message ?? `memory: ${input.title}`)
+      return {
+        node: { id: input.id, title: input.title, content: input.content, scope, branch: 'default' },
+        timeline: await this.timeline(scope, workspace, input.id),
+      }
+    })
   }
 
   /**
@@ -122,6 +142,72 @@ export class MemoryService extends Service {
     if (content === undefined) return undefined
     const title = firstHeading(content) ?? id
     return { node: { id, title, content: stripHeading(content), scope, branch: 'default' }, timeline: await this.timeline(scope, workspace, id) }
+  }
+
+  /**
+   * Full-text search one store: case-insensitive literal matches over node
+   * bodies, ranked by match count. Archived nodes are excluded.
+   * @param scope - which store to search.
+   * @param workspace - workspace path (used only for `scope: 'workspace'`).
+   * @param query - the literal text to find; empty queries yield no hits.
+   * @returns the top hits, best match first.
+   */
+  async search(scope: MemoryScope, workspace: string | undefined, query: string): Promise<SearchHit[]> {
+    const dir = await this.resolveStore(scope, workspace)
+    return this.searchAt(dir, query)
+  }
+
+  /**
+   * Full-text search every store on the ancestor chain, nearest first, then
+   * the central store — the search counterpart of `loadChain`.
+   * @param workspace - the directory whose ancestor chain to search.
+   * @param query - the literal text to find.
+   * @returns one entry per store with at least one hit.
+   */
+  async searchChain(workspace: string, query: string): Promise<Array<{ store: string; hits: SearchHit[] }>> {
+    const found: Array<{ store: string; hits: SearchHit[] }> = []
+    for (const store of await this.ancestorStores(workspace)) {
+      if (!(await this.storeHasCommits(store))) continue
+      const hits = await this.searchAt(store, query)
+      if (hits.length > 0) found.push({ store, hits })
+    }
+    if (await this.storeHasCommits(this.centralRoot)) {
+      const hits = await this.searchAt(this.centralRoot, query)
+      if (hits.length > 0) found.push({ store: this.centralRoot, hits })
+    }
+    return found
+  }
+
+  /** Search one already-resolved store directory. */
+  private async searchAt(dir: string, query: string): Promise<SearchHit[]> {
+    if (query.length === 0 || !(await this.git.hasCommits(dir))) return []
+    const byId = new Map<string, { title: string; snippet: string; count: number }>()
+    for (const line of await this.git.grep(dir, query)) {
+      const firstColon = line.indexOf(':')
+      const path = firstColon < 0 ? line : line.slice(0, firstColon)
+      if (!path.endsWith('.md') || path.startsWith('archive/')) continue
+      const content = line.slice(firstColon + 1)
+      const text = content.slice(content.indexOf(':') + 1).trim()
+      if (text === '') continue
+      const id = path.slice(0, -3)
+      const entry = byId.get(id)
+      if (entry === undefined) byId.set(id, { title: id, snippet: text, count: 1 })
+      else entry.count += 1
+    }
+    const ranked = [...byId.entries()]
+      .sort((left, right) => right[1].count - left[1].count)
+      .slice(0, SEARCH_MAX_HITS)
+    const hits: SearchHit[] = []
+    for (const [id, entry] of ranked) {
+      const content = await this.git.readFile(dir, nodePath(id))
+      hits.push({
+        id,
+        title: content === undefined ? entry.title : (firstHeading(content) ?? entry.title),
+        snippet: entry.snippet,
+        matchCount: entry.count,
+      })
+    }
+    return hits
   }
 
   /**
@@ -344,16 +430,20 @@ export class MemoryService extends Service {
   async branch(scope: MemoryScope, workspace: string | undefined, name: string): Promise<{ branch: string }> {
     const error = branchNameError(name)
     if (error !== undefined) throw new Error(error)
-    const dir = await this.resolveStore(scope, workspace)
-    await this.git.createBranch(dir, name)
-    return { branch: name }
+    return serializeWrite(async () => {
+      const dir = await this.resolveStore(scope, workspace)
+      await this.git.createBranch(dir, name)
+      return { branch: name }
+    })
   }
 
   /** Switch to an existing branch. */
   async checkout(scope: MemoryScope, workspace: string | undefined, name: string): Promise<{ branch: string }> {
-    const dir = await this.resolveStore(scope, workspace)
-    await this.git.checkoutBranch(dir, name)
-    return { branch: name }
+    return serializeWrite(async () => {
+      const dir = await this.resolveStore(scope, workspace)
+      await this.git.checkoutBranch(dir, name)
+      return { branch: name }
+    })
   }
 
   /** The current branch name of a store. */
@@ -386,26 +476,28 @@ export class MemoryService extends Service {
     from: string,
     strategy?: 'ours' | 'theirs',
   ): Promise<MergeResult> {
-    const dir = await this.resolveStore(scope, workspace)
-    const headBefore = await this.git.revParseHead(dir)
-    const clean = await this.git.startMerge(dir, from, strategy)
-    if (clean) {
-      await this.git.commit(dir, `memory: merge branch ${from}`)
-      const changed = headBefore === undefined ? [] : await this.git.diffFiles(dir, headBefore, 'HEAD')
-      const merged = changed
-        .filter(path => path.endsWith('.md'))
-        .map(path => path.slice(0, -3))
-      return { merged, conflicts: [] }
-    }
-    const conflicts: MergeConflict[] = []
-    for (const relPath of await this.git.conflictedFiles(dir)) {
-      const id = relPath.endsWith('.md') ? relPath.slice(0, -3) : relPath
-      const toContent = await this.git.showFile(dir, 'HEAD', relPath)
-      const fromContent = await this.git.showFile(dir, from, relPath)
-      conflicts.push({ id, toContent: toContent ?? '', fromContent: fromContent ?? '' })
-    }
-    await this.git.abortMerge(dir)
-    return { merged: [], conflicts }
+    return serializeWrite(async () => {
+      const dir = await this.resolveStore(scope, workspace)
+      const headBefore = await this.git.revParseHead(dir)
+      const clean = await this.git.startMerge(dir, from, strategy)
+      if (clean) {
+        await this.git.commit(dir, `memory: merge branch ${from}`)
+        const changed = headBefore === undefined ? [] : await this.git.diffFiles(dir, headBefore, 'HEAD')
+        const merged = changed
+          .filter(path => path.endsWith('.md'))
+          .map(path => path.slice(0, -3))
+        return { merged, conflicts: [] }
+      }
+      const conflicts: MergeConflict[] = []
+      for (const relPath of await this.git.conflictedFiles(dir)) {
+        const id = relPath.endsWith('.md') ? relPath.slice(0, -3) : relPath
+        const toContent = await this.git.showFile(dir, 'HEAD', relPath)
+        const fromContent = await this.git.showFile(dir, from, relPath)
+        conflicts.push({ id, toContent: toContent ?? '', fromContent: fromContent ?? '' })
+      }
+      await this.git.abortMerge(dir)
+      return { merged: [], conflicts }
+    })
   }
 
   /**
@@ -417,14 +509,16 @@ export class MemoryService extends Service {
    * @throws when the node does not exist.
    */
   async remove(scope: MemoryScope, workspace: string | undefined, id: string): Promise<void> {
-    const dir = await this.resolveStore(scope, workspace)
-    const relPath = nodePath(id)
-    if (await this.git.readFile(dir, relPath) === undefined) {
-      throw new Error(`memory: no memory "${id}" to remove`)
-    }
-    const fs = await import('node:fs/promises')
-    await fs.rm(join(dir, relPath))
-    await this.git.commit(dir, `memory: remove ${id}`)
+    return serializeWrite(async () => {
+      const dir = await this.resolveStore(scope, workspace)
+      const relPath = nodePath(id)
+      if (await this.git.readFile(dir, relPath) === undefined) {
+        throw new Error(`memory: no memory "${id}" to remove`)
+      }
+      const fs = await import('node:fs/promises')
+      await fs.rm(join(dir, relPath))
+      await this.git.commit(dir, `memory: remove ${id}`)
+    })
   }
 
   /**
@@ -438,17 +532,19 @@ export class MemoryService extends Service {
    * @throws when the node does not exist.
    */
   async archive(scope: MemoryScope, workspace: string | undefined, id: string): Promise<{ id: string }> {
-    const dir = await this.resolveStore(scope, workspace)
-    const relPath = nodePath(id)
-    if (await this.git.readFile(dir, relPath) === undefined) {
-      throw new Error(`memory: no memory "${id}" to archive`)
-    }
-    const archivedId = `archive/${id}`
-    const fs = await import('node:fs/promises')
-    await fs.mkdir(dirname(join(dir, nodePath(archivedId))), { recursive: true })
-    await fs.rename(join(dir, relPath), join(dir, nodePath(archivedId)))
-    await this.git.commit(dir, `memory: archive ${id}`)
-    return { id: archivedId }
+    return serializeWrite(async () => {
+      const dir = await this.resolveStore(scope, workspace)
+      const relPath = nodePath(id)
+      if (await this.git.readFile(dir, relPath) === undefined) {
+        throw new Error(`memory: no memory "${id}" to archive`)
+      }
+      const archivedId = `archive/${id}`
+      const fs = await import('node:fs/promises')
+      await fs.mkdir(dirname(join(dir, nodePath(archivedId))), { recursive: true })
+      await fs.rename(join(dir, relPath), join(dir, nodePath(archivedId)))
+      await this.git.commit(dir, `memory: archive ${id}`)
+      return { id: archivedId }
+    })
   }
 
   /**
@@ -461,18 +557,20 @@ export class MemoryService extends Service {
    * @throws when no archived node exists for that id.
    */
   async unarchive(scope: MemoryScope, workspace: string | undefined, id: string): Promise<{ id: string }> {
-    const dir = await this.resolveStore(scope, workspace)
-    const archived = id.startsWith('archive/') ? id : `archive/${id}`
-    const relPath = nodePath(archived)
-    if (await this.git.readFile(dir, relPath) === undefined) {
-      throw new Error(`memory: no archived memory "${id}" to restore`)
-    }
-    const original = archived.slice('archive/'.length)
-    const fs = await import('node:fs/promises')
-    await fs.mkdir(dirname(join(dir, nodePath(original))), { recursive: true })
-    await fs.rename(join(dir, relPath), join(dir, nodePath(original)))
-    await this.git.commit(dir, `memory: unarchive ${original}`)
-    return { id: original }
+    return serializeWrite(async () => {
+      const dir = await this.resolveStore(scope, workspace)
+      const archived = id.startsWith('archive/') ? id : `archive/${id}`
+      const relPath = nodePath(archived)
+      if (await this.git.readFile(dir, relPath) === undefined) {
+        throw new Error(`memory: no archived memory "${id}" to restore`)
+      }
+      const original = archived.slice('archive/'.length)
+      const fs = await import('node:fs/promises')
+      await fs.mkdir(dirname(join(dir, nodePath(original))), { recursive: true })
+      await fs.rename(join(dir, relPath), join(dir, nodePath(original)))
+      await this.git.commit(dir, `memory: unarchive ${original}`)
+      return { id: original }
+    })
   }
 }
 

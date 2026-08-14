@@ -104,3 +104,17 @@ export interface MergeResult {
   readonly merged: string[]
   readonly conflicts: MergeConflict[]
 }
+
+/**
+ * One full-text search hit inside a store.
+ * @param id - the matching node id.
+ * @param title - the node's heading.
+ * @param snippet - the first matching line, trimmed.
+ * @param matchCount - how many lines matched (the ranking key).
+ */
+export interface SearchHit {
+  readonly id: string
+  readonly title: string
+  readonly snippet: string
+  readonly matchCount: number
+}

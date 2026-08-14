@@ -367,6 +367,49 @@ describe('the memory service over a git-backed store', () => {
     expect(await memories.read('workspace', workspace, 'design/x')).toBeDefined()
   })
 
+  it('serializes concurrent writes so every write lands as its own commit', async () => {
+    const root = tempRoot('concurrent-writes')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await Promise.all(Array.from({ length: 8 }, (_, index) =>
+      memories.remember('workspace', workspace, { id: `concurrent/n${index}`, title: `N${index}`, content: 'v1' })))
+
+    expect(await memories.list('workspace', workspace)).toHaveLength(8)
+    // each node's earliest commit must carry its own message; without the
+    // write lock, interleaved `git add -A` staging would fold nodes into one
+    // another's commits and this fails.
+    for (let index = 0; index < 8; index++) {
+      const timeline = await memories.timeline('workspace', workspace, `concurrent/n${index}`)
+      expect(timeline.at(-1)?.message).toBe(`memory: N${index}`)
+    }
+  })
+
+  it('retries a git call that collides on index.lock', async () => {
+    const root = tempRoot('index-lock-retry')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await service(join(root, 'central'))
+    const originalSpawn = ctx.subprocess.spawn.bind(ctx.subprocess)
+    let collisions = 0
+    ctx.subprocess.spawn = ((options: Parameters<typeof originalSpawn>[0]) => {
+      if (collisions < 2) {
+        collisions += 1
+        return {
+          done: Promise.resolve({ exitCode: 128 }),
+          collected: {
+            stdout: { readFrom: () => ({ text: '' }) },
+            stderr: { readFrom: () => ({ text: "fatal: Unable to create '.../.git/index.lock': File exists." }) },
+          },
+        } as unknown as ReturnType<typeof originalSpawn>
+      }
+      return originalSpawn(options)
+    })
+
+    await memories.remember('workspace', workspace, { id: 'retry/me', title: 'Retry', content: 'v1' })
+
+    expect(collisions).toBe(2)
+    expect((await memories.read('workspace', workspace, 'retry/me'))?.node.content).toBe('v1')
+  })
+
   it('merges a branch cleanly and reports the brought-in nodes', async () => {
     const root = tempRoot('merge-clean')
     const workspace = join(root, 'ws')
@@ -426,5 +469,54 @@ describe('the memory service over a git-backed store', () => {
     expect(result.conflicts).toEqual([])
     expect(result.merged).toEqual(['design/x'])
     expect((await memories.read('workspace', workspace, 'design/x'))?.node.content).toBe('approach A conclusion')
+  })
+
+  it('searches node bodies case-insensitively and ranks by match count', async () => {
+    const root = tempRoot('search-basic')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'bugfix/enoent', title: '修复 ENOENT', content: 'store 目录缺失导致 spawn 失败' })
+    await memories.remember('workspace', workspace, { id: 'env/git', title: 'git 用法', content: 'git commit 需要身份。\nspawn 走 ctx.subprocess。\nspawn 失败要重试。' })
+
+    const hits = await memories.search('workspace', workspace, 'spawn')
+    expect(hits.map(hit => hit.id)).toEqual(['env/git', 'bugfix/enoent'])
+    expect(hits[0]?.matchCount).toBeGreaterThan(hits[1]?.matchCount ?? 0)
+    expect(hits[1]?.title).toBe('修复 ENOENT')
+
+    expect(await memories.search('workspace', workspace, 'SPAWN')).toHaveLength(2)
+    expect(await memories.search('workspace', workspace, '不存在的内容xyz')).toEqual([])
+    expect(await memories.search('workspace', workspace, '')).toEqual([])
+  })
+
+  it('excludes archived nodes from search results', async () => {
+    const root = tempRoot('search-archive')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'design/old', title: '旧方案', content: 'spawn 相关旧结论' })
+    await memories.remember('workspace', workspace, { id: 'design/new', title: '新方案', content: 'spawn 相关现行结论' })
+    await memories.archive('workspace', workspace, 'design/old')
+
+    const hits = await memories.search('workspace', workspace, 'spawn')
+    expect(hits.map(hit => hit.id)).toEqual(['design/new'])
+  })
+
+  it('searches the ancestor chain and the central store', async () => {
+    const root = tempRoot('search-chain')
+    const a = join(root, 'a')
+    const b = join(a, 'b')
+    const central = join(root, 'central')
+    const { memories } = await service(central)
+    await memories.remember('workspace', a, { id: 'parent/topic', title: 'Parent', content: 'parent level spawn note' })
+    await memories.remember('workspace', b, { id: 'leaf/topic', title: 'Leaf', content: 'leaf level spawn note' })
+    await memories.remember('central', undefined, { id: 'shared/topic', title: 'Shared', content: 'central spawn note' })
+
+    const chain = await memories.searchChain(b, 'spawn')
+    expect(chain.map(entry => entry.store)).toEqual([
+      join(b, '.dsh-memory'),
+      join(a, '.dsh-memory'),
+      central,
+    ])
+    expect(chain[0]?.hits[0]?.id).toBe('leaf/topic')
+    expect(chain[2]?.hits[0]?.id).toBe('shared/topic')
   })
 })
