@@ -254,12 +254,12 @@
 #
 # The memory service (`ctx.memories`) lives on the HOST plane (base bundle);
 # this group only mounts the model-facing consumers — the `memory` tool, the
-# catalogue injection, and the turn-end accumulation.
+# catalogue injection, and the turn-end accumulation. No isolate realm here:
+# the service is host-provided, so an entry-local realm would hide it from
+# these consumers.
 - id: memory
   name: cordis:group
   group: true
-  isolate:
-    memories: true
   config:
     - id: tool-memory
       name: '@deepseek-ai/dsh-tool-memory'
