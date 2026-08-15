@@ -18,17 +18,18 @@ Injects `llm`.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `trigger` | `on-activity` | When to run the judge: `on-activity` (only turns with tool results) or `always` (every turn end). |
+| `trigger` | `on-activity` | When to run the judge: `on-activity` (only turns with tool results), `always` (every turn end), or `keyframe` (only at keyframes — the latest user message wraps the task up in explicit wording, or `judgeInterval` turns passed since the last call; the judge itself confirms real keyframes and otherwise outputs nothing). |
 | `maxCandidates` | `2` | Max candidate memories or handoff memos one turn may produce. |
 | `maxInputMessages` | `12` | Trailing messages the judge sees. |
 | `maxInputBytes` | `16384` | Max framed judge input in UTF-8 bytes; larger turns are skipped. |
 | `maxOutputTokens` | `512` | Judge output-token cap. |
 | `timeoutMs` | `30000` | Judge request deadline. |
+| `judgeInterval` | `6` | Keyframe fallback: judge at least every N turns (keyframe trigger only). |
 | `provider` / `model` | — | Explicit route; defaults to the session's latest `request/header` route. |
 
 ## Design
 
-- `session/event` `turn/end` → judge (unless `on-activity` and the turn had no `tools/result`).
+- `session/event` `turn/end` → judge (per `trigger`: `on-activity` needs a `tools/result` in the turn, `always` never skips, `keyframe` needs a wrap-up wording in the latest user message or `judgeInterval` turns since the last call).
 - The judge streams an auxiliary `ctx.llm` call (route from config or the latest `request/header`) over the trailing session messages framed as JSON, asking for `{"candidates":[{title, content}], "handoffs":[{title, content}]}` where `handoffs` carries unfinished-task memos (目标/进度/下一步/遗留坑/相关文件 structure); the answer is parsed tolerantly (code fences and stray prose allowed).
 - Both lists are deduplicated against the stored ancestor-chain memories by a second verifier call; handoff memos already present as `handoff/<task>` nodes are dropped.
 - Candidates are cached per session (`WeakMap`); the next `agent/pre-step` folds one `rin-accumulate` user message into the request and clears the cache, so candidates are presented exactly once.

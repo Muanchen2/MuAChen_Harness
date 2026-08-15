@@ -77,9 +77,9 @@ async function liveContext(
 
 const testSignal = new AbortController().signal
 
-function stubAgent(cwd?: string): Agent {
+function stubAgent(cwd?: string, events: unknown[] = []): Agent {
   const id = SessionId('s1')
-  const session = Session.create(id, [], cwd === undefined
+  const session = Session.create(id, events as never, cwd === undefined
     ? { version: SESSION_FORMAT_VERSION, id, createdAt: 0 }
     : { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd })
   return {
@@ -103,6 +103,19 @@ function endTurn(ctx: Context, agent: Agent, turn: number): void {
   ctx.emit('session/event', agent.session, {
     type: 'turn/end', seq: 1, time: 1, data: { turn, reason: { kind: 'completed' as const } },
   })
+}
+
+/** A durable user-message event, as the real loop records it (keyframe detection reads session.events). */
+function userEvent(text: string, index: number): unknown {
+  return {
+    type: 'user/message', seq: index, time: 1, surfaceOp: 'append',
+    data: {
+      id: `m${index}`,
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text }],
+    },
+  }
 }
 
 function toolResult(ctx: Context, agent: Agent): void {
@@ -337,5 +350,35 @@ describe('the memory accumulation plugin', () => {
     expect(parseHandoffs('{"handoffs":"nope"}', 2)).toEqual([])
     expect(parseHandoffs('{"handoffs":[{"title":"","content":"x"}]}', 2)).toEqual([])
     expect(parseHandoffs('{"candidates":[{"title":"t","content":"c"}]}', 2)).toEqual([])
+  })
+
+  it('judges only at keyframes under the keyframe trigger', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      textChunks(JSON.stringify({ candidates: [], handoffs: [] })),
+    ]), { trigger: 'keyframe' })
+    // ordinary session: no wrap-up wording → no judge call
+    const ordinary = stubAgent(undefined, [userEvent('继续之前的修复工作', 0), userEvent('继续做优化', 1)])
+    toolResult(ctx, ordinary)
+    endTurn(ctx, ordinary, 1)
+    await new Promise(resolve => setTimeout(resolve, 80))
+    expect(adapter.requests).toEqual([])
+
+    // wrap-up wording → keyframe → judge runs
+    const wrapping = stubAgent(undefined, [userEvent('继续之前的修复工作', 0), userEvent('先到这吧，下次继续', 1)])
+    toolResult(ctx, wrapping)
+    endTurn(ctx, wrapping, 1)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+  })
+
+  it('judges every judgeInterval turns as the keyframe fallback', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      textChunks(JSON.stringify({ candidates: [], handoffs: [] })),
+      textChunks(JSON.stringify({ candidates: [], handoffs: [] })),
+    ]), { trigger: 'keyframe', judgeInterval: 3 })
+    const agent = stubAgent(undefined, Array.from({ length: 6 }, (_, index) => userEvent(`继续当前任务第 ${index + 1} 步`, index)))
+    for (let turn = 1; turn <= 6; turn++) {
+      endTurn(ctx, agent, turn)
+    }
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(2) })
   })
 })

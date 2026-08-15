@@ -56,8 +56,16 @@ declare module '@deepseek-ai/dsh-llm' {
 
 /** Plugin configuration. */
 export interface Config {
-  /** When to run the judge: every turn end, or only turns with tool activity. */
-  trigger?: 'on-activity' | 'always'
+  /**
+   * When to run the judge:
+   * - `on-activity` (default): only turns with tool results.
+   * - `always`: every turn end.
+   * - `keyframe`: only at keyframes — a cheap rule pre-filter (wrap-up words,
+   *   user-topic shift) or the `judgeInterval` fallback — so long sessions
+   *   stop paying one LLM call per active turn; the judge itself confirms
+   *   whether the fragment is a real keyframe and otherwise outputs nothing.
+   */
+  trigger?: 'on-activity' | 'always' | 'keyframe'
   /** Max candidate memories or handoff memos one turn may produce. */
   maxCandidates?: number
   /** How many trailing messages the judge sees. */
@@ -68,6 +76,8 @@ export interface Config {
   maxOutputTokens?: number
   /** Judge request deadline in milliseconds. */
   timeoutMs?: number
+  /** Keyframe fallback: judge at least every N turns (keyframe trigger only). */
+  judgeInterval?: number
   /** Optional explicit provider route; must be paired with `model`. */
   provider?: string
   /** Optional explicit model id; must be paired with `provider`. */
@@ -75,12 +85,13 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = z.object({
-  trigger: z.union([z.const('on-activity'), z.const('always')]).default('on-activity'),
+  trigger: z.union([z.const('on-activity'), z.const('always'), z.const('keyframe')]).default('on-activity'),
   maxCandidates: z.number().step(1).min(1).default(2),
   maxInputMessages: z.number().step(1).min(1).default(12),
   maxInputBytes: z.number().step(1).min(1).default(16 * 1024),
   maxOutputTokens: z.number().step(1).min(1).default(512),
   timeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(30_000),
+  judgeInterval: z.number().step(1).min(1).default(6),
   provider: z.string(),
   model: z.string(),
 })
@@ -90,6 +101,7 @@ const JUDGE_SYSTEM = [
   '你是一个 AI 会话记忆筛选器，从会话片段中识别值得长期记住的项目经验。',
   '保留：修好的 bug、做出的架构决策、解决的坑、学到的环境或工具路径、带理由的立场改变。',
   '丢弃：纯过程叙述、状态汇报、琐碎内容。',
+  '若片段只是任务进行中的普通进展（无任务切换、无收尾、无值得沉淀的经验），输出空候选。',
   '另识别交接需求：若片段明确表明任务尚未完成（用户要求"下次继续/先到这/还没搞定"，或助手总结出未完成的下一步与遗留坑），',
   '输出交接单候选：{"handoffs":[{"title":"简短任务名","content":"交接单内容，按 目标/进度/下一步/遗留坑/相关文件 五段组织"}]}。',
   '任务已完成或片段无交接信号时输出 {"handoffs":[]}。',
@@ -113,6 +125,47 @@ const pendingCandidates = new WeakMap<Session, {
 }>()
 /** Sessions with tool activity in the current turn, for the on-activity trigger. */
 const activeTurns = new WeakSet<Session>()
+/** Last judged turn per session, for the keyframe fallback interval. */
+const lastJudged = new WeakMap<Session, number>()
+
+/**
+ * Keyframe pre-filter: a turn is worth one judge call when the latest real
+ * user message wraps the task up in explicit wording (a direct expression of
+ * the user's intent, not a heuristic guess). The fallback interval then
+ * guarantees a judge call every `judgeInterval` turns regardless. Whether a
+ * turn is a real keyframe (task switch, meaningful progress) is left to the
+ * judge itself, which is instructed to output nothing for ordinary progress.
+ * Topic-shift guessing was tried and removed: without Chinese word
+ * segmentation, shared character fragments are coincidence, not topic.
+ */
+const WRAPUP_RE = /(先到(这|这儿|这里)?|就到这|先这样|差不多了|收尾|总结一下|总结下|结束(吧|了)?|下次(再|继续)|明天(再|继续)|交接|handoff|待办)/i
+
+/** Real user messages on the durable event stream, oldest first, with their seq. */
+function userTextsOf(session: Session): Array<{ at: number; text: string }> {
+  const entries: Array<{ at: number; text: string }> = []
+  for (const event of session.events) {
+    if (event.type !== 'user/message') continue
+    const data = event.data as {
+      message?: { source?: { kind?: unknown }; content?: unknown }
+      source?: { kind?: unknown }
+      content?: unknown
+    } | undefined
+    // Real events nest the message under `data.message`; some plugin-injected
+    // seeds flatten it — accept both shapes.
+    const payload = data?.message ?? data
+    if (payload === undefined || payload.source?.kind !== 'user') continue
+    const content = (payload.content ?? []) as Array<{ text?: string } | string>
+    const text = content.map(part => typeof part === 'string' ? part : (part.text ?? '')).join(' ')
+    if (text.trim() !== '') entries.push({ at: event.seq, text })
+  }
+  return entries
+}
+
+/** Whether the turn deserves a judge call under the keyframe trigger. */
+function isKeyframe(session: Session): boolean {
+  const latest = userTextsOf(session).at(-1)
+  return latest !== undefined && WRAPUP_RE.test(latest.text)
+}
 
 /** Translate terminal finish reasons into an auxiliary-call failure. */
 function finishError(finish: FinishReason): Error | undefined {
@@ -257,6 +310,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const maxInputBytes = config.maxInputBytes ?? 16 * 1024
   const maxOutputTokens = config.maxOutputTokens ?? 512
   const timeoutMs = config.timeoutMs ?? 30_000
+  const judgeInterval = config.judgeInterval ?? 6
 
   const judge = async (session: Session, turn: number): Promise<void> => {
     try {
@@ -302,7 +356,18 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.on('session/event', (session, event) => {
     if (event.type !== 'turn/end') return
     const active = activeTurns.delete(session)
-    if (trigger === 'always' || active) void judge(session, event.data.turn)
+    const turn = event.data.turn
+    if (trigger === 'always') {
+      void judge(session, turn)
+    } else if (trigger === 'keyframe') {
+      const last = lastJudged.get(session)
+      if (isKeyframe(session) || (last === undefined ? turn >= judgeInterval : turn - last >= judgeInterval)) {
+        lastJudged.set(session, turn)
+        void judge(session, turn)
+      }
+    } else if (active) {
+      void judge(session, turn)
+    }
   })
 
   ctx.on('tools/result', (exec: ToolExecution) => {
