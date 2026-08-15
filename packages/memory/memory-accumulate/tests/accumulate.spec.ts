@@ -13,7 +13,7 @@ import type { ToolExecution, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import MemoryService from '@deepseek-ai/dsh-memory'
 import * as accumulate from '../src/index.ts'
-import { parseCandidates, parseHandoffs } from '../src/index.ts'
+import { parseCandidates, parseHandoffs, parseArchives } from '../src/index.ts'
 
 const contexts: Context[] = []
 const roots: string[] = []
@@ -410,5 +410,49 @@ describe('the memory accumulation plugin', () => {
     } as never)
     await new Promise(resolve => setTimeout(resolve, 80))
     expect(adapter.requests).toEqual([])
+  })
+
+  it('auto-archives completed handoff memos before judging', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      textChunks(JSON.stringify({ candidates: [], handoffs: [], archives: [] })),
+    ]))
+    const workspace = join(tempRoot('auto-archive'), 'ws')
+    await ctx.memories.remember('workspace', workspace, { id: 'handoff/done-x', title: '交接单：任务 X — 已完成 ✅', content: '目标：…' })
+    await ctx.memories.remember('workspace', workspace, { id: 'handoff/pending-y', title: '交接单：任务 Y', content: '目标：…' })
+
+    const agent = stubAgent(workspace, [userEvent('先到这吧，下次继续', 0)])
+    toolResult(ctx, agent)
+    endTurn(ctx, agent, 1)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+
+    // the completed memo was archived automatically; the open one stays
+    expect(await ctx.memories.list('workspace', workspace)).toEqual(['handoff/pending-y'])
+    expect((await ctx.memories.read('workspace', workspace, 'archive/handoff/done-x'))?.node.title).toContain('已完成')
+  })
+
+  it('presents archive proposals for the agent to confirm', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      textChunks(JSON.stringify({ candidates: [], handoffs: [], archives: [{ id: 'design/stale', reason: '被新结论推翻' }] })),
+    ]))
+    const agent = stubAgent()
+    toolResult(ctx, agent)
+    endTurn(ctx, agent, 1)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+
+    const decision = await stepDecision(ctx, agent, [userPrompt])
+    const [injected] = accumulateMessages(decision)
+    expect(injected).toBeDefined()
+    expect(injected?.text).toContain('归档候选')
+    expect(injected?.text).toContain('design/stale')
+    expect(injected?.text).toContain('memory archive')
+  })
+
+  it('parseArchives tolerates fences, stray prose, and garbage', () => {
+    expect(parseArchives('```json\n{"archives":[{"id":"design/x","reason":"被推翻"}]}\n```', 2))
+      .toEqual([{ id: 'design/x', reason: '被推翻' }])
+    expect(parseArchives('no json here', 2)).toEqual([])
+    expect(parseArchives('{"archives":"nope"}', 2)).toEqual([])
+    expect(parseArchives('{"archives":[{"id":"","reason":"x"}]}', 2)).toEqual([])
+    expect(parseArchives('{"archives":[{"id":"design/x"}]}', 2)).toEqual([])
   })
 })

@@ -17,6 +17,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { isDeepStrictEqual } from 'node:util'
+import { dirname } from 'node:path'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { BlockAssembler, createUserMessage, deepFreeze } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
@@ -37,6 +38,12 @@ export interface MemoryCandidate {
   readonly content: string
 }
 
+/** One stale-memory archive proposal from the judge. */
+export interface ArchiveCandidate {
+  readonly id: string
+  readonly reason: string
+}
+
 /** Durable producer facts for one accumulation prompt. */
 export interface MemoryAccumulateSource {
   kind: 'rin-accumulate'
@@ -46,6 +53,8 @@ export interface MemoryAccumulateSource {
   readonly candidates: readonly string[]
   /** Handoff candidate titles, for quick scanning. */
   readonly handoffs: readonly string[]
+  /** Archive proposal ids, for quick scanning. */
+  readonly archives: readonly string[]
 }
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -114,8 +123,10 @@ const JUDGE_SYSTEM = [
   '另识别交接需求：若片段明确表明任务尚未完成（用户要求"下次继续/先到这/还没搞定"，或助手总结出未完成的下一步与遗留坑），',
   '输出交接单候选：{"handoffs":[{"title":"简短任务名","content":"交接单内容，按 目标/进度/下一步/遗留坑/相关文件 五段组织"}]}。',
   '任务已完成或片段无交接信号时输出 {"handoffs":[]}。',
-  '只输出一个 JSON 对象：{"candidates":[{"title":"简短标题","content":"事实性内容（发生了什么、结论）"}],"handoffs":[...]}。',
-  '没有候选时输出 {"candidates":[],"handoffs":[]}。JSON 之外不要输出任何文字。',
+  '另识别被推翻的旧记忆：若片段明确推翻了下方"已有记忆"列表中的某条（结论相反/已被替代/明确作废），',
+  '输出归档候选：{"archives":[{"id":"该记忆的 id","reason":"简短原因"}]}；无则 []。模糊判断不要提议。',
+  '只输出一个 JSON 对象：{"candidates":[{"title":"简短标题","content":"事实性内容（发生了什么、结论）"}],"handoffs":[...],"archives":[...]}。',
+  '没有候选时输出 {"candidates":[],"handoffs":[],"archives":[]}。JSON 之外不要输出任何文字。',
 ].join('\n')
 
 /** The verifier's stable system instruction: compare candidates against real stored memories. */
@@ -131,6 +142,7 @@ const pendingCandidates = new WeakMap<Session, {
   turn: number
   candidates: MemoryCandidate[]
   handoffs: MemoryCandidate[]
+  archives: ArchiveCandidate[]
 }>()
 /** Sessions with tool activity in the current turn, for the on-activity trigger. */
 const activeTurns = new WeakSet<Session>()
@@ -174,6 +186,37 @@ function userTextsOf(session: Session): Array<{ at: number; text: string }> {
 function isKeyframe(session: Session): boolean {
   const latest = userTextsOf(session).at(-1)
   return latest !== undefined && WRAPUP_RE.test(latest.text)
+}
+
+/**
+ * Archive every handoff memo on the session's ancestor chain whose title
+ * marks it complete ("已完成"). Deterministic, reversible, zero LLM cost —
+ * completed handoffs are explicit state, not a judgment call.
+ * @returns how many memos were archived.
+ */
+async function autoArchiveCompletedHandoffs(
+  memories: MemoryService,
+  session: Session,
+  logger: { warn(message: string, ...args: unknown[]): void },
+): Promise<number> {
+  const cwd = session.header.cwd
+  if (cwd === undefined) return 0
+  try {
+    let archived = 0
+    for (const entry of await memories.loadChain(cwd)) {
+      for (const node of entry.nodes) {
+        if (!node.id.startsWith('handoff/') || !node.title.includes('已完成')) continue
+        const workspace = entry.scope === 'workspace' ? dirname(entry.store) : undefined
+        await memories.archive(entry.scope, workspace, node.id)
+        archived += 1
+      }
+    }
+    return archived
+  } catch (error) {
+    // Maintenance must never break the session: log and continue.
+    logger.warn('memory-accumulate: auto-archive failed: %o', error)
+    return 0
+  }
 }
 
 /** Translate terminal finish reasons into an auxiliary-call failure. */
@@ -237,6 +280,28 @@ export function parseHandoffs(text: string, max: number): MemoryCandidate[] {
   return parseList(text, 'handoffs', max)
 }
 
+/** Parse the judge's stale-memory archive proposals tolerantly. */
+export function parseArchives(text: string, max: number): ArchiveCandidate[] {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start < 0 || end <= start) return []
+  try {
+    const parsed: unknown = JSON.parse(text.slice(start, end + 1))
+    const list = (parsed as Record<string, unknown> | null)?.['archives']
+    if (!Array.isArray(list)) return []
+    return list
+      .filter((candidate): candidate is { id: string; reason: string } =>
+        typeof candidate === 'object' && candidate !== null
+        && typeof (candidate as { id?: unknown }).id === 'string'
+        && (candidate as { id: string }).id.length > 0
+        && typeof (candidate as { reason?: unknown }).reason === 'string')
+      .slice(0, max)
+      .map(candidate => ({ id: candidate.id, reason: candidate.reason }))
+  } catch {
+    return []
+  }
+}
+
 /** The session's route: explicit config pair, else the latest request header. */
 function resolveRoute(
   session: Session,
@@ -252,7 +317,7 @@ function resolveRoute(
   return undefined
 }
 
-/** Titles and content heads of every memory on the session's ancestor chain (dedup material). */
+/** Titles, ids, and content heads of every memory on the session's ancestor chain (dedup + archive material). */
 async function existingMemorySummaries(
   memories: MemoryService,
   session: Session,
@@ -263,7 +328,7 @@ async function existingMemorySummaries(
     const chain = await memories.loadChain(cwd)
     return chain.flatMap(entry => entry.nodes.map((node) => {
       const body = node.content.replace(/\s+/g, ' ').trim()
-      return `${node.title}｜${body.slice(0, 120)}`
+      return `${node.id} ${node.title}｜${body.slice(0, 120)}`
     }))
   } catch {
     return []
@@ -324,6 +389,11 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   const judge = async (session: Session, turn: number): Promise<void> => {
     try {
+      // Layer 1 (deterministic, zero LLM): handoff memos whose title marks
+      // them complete are archived automatically — an explicit state, and
+      // archive is reversible, so this cannot lose anything.
+      const autoArchived = await autoArchiveCompletedHandoffs(ctx.memories, session, ctx.logger)
+      if (autoArchived > 0) ctx.logger.info('memory-accumulate: archived %d completed handoff memo(s)', autoArchived)
       const route = resolveRoute(session, config)
       if (route === undefined) {
         ctx.logger.warn('memory-accumulate: no provider/model route available; skipping judgment')
@@ -334,7 +404,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       // Existing memory summaries go to the judge so it does not re-propose
       // stored topics (first pass), and then to the verifier which compares
       // the generated candidates against the real stored content (second
-      // pass) — title lists alone were not enough to stop duplicates.
+      // pass) — title lists alone were not enough to stop duplicates. The
+      // same list carries ids so the judge can name stale memories to
+      // archive (layer 2, proposal-only).
       const existing = await existingMemorySummaries(ctx.memories, session)
       const judgeSystem = existing.length === 0
         ? JUDGE_SYSTEM
@@ -342,7 +414,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       const judgeText = await llmText(ctx, route, session, judgeSystem, framed, maxOutputTokens, timeoutMs)
       const list = parseCandidates(judgeText, maxCandidates)
       const handoffs = parseHandoffs(judgeText, maxCandidates)
-      if (list.length === 0 && handoffs.length === 0) return
+      const archives = parseArchives(judgeText, maxCandidates)
+      if (list.length === 0 && handoffs.length === 0 && archives.length === 0) return
       let verified = list
       let verifiedHandoffs = handoffs
       if (existing.length > 0) {
@@ -355,8 +428,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           ctx.logger.warn('memory-accumulate: verification failed, keeping unverified candidates: %o', error)
         }
       }
-      if (verified.length > 0 || verifiedHandoffs.length > 0) {
-        pendingCandidates.set(session, { turn, candidates: verified, handoffs: verifiedHandoffs })
+      if (verified.length > 0 || verifiedHandoffs.length > 0 || archives.length > 0) {
+        pendingCandidates.set(session, { turn, candidates: verified, handoffs: verifiedHandoffs, archives })
       }
     } catch (error) {
       ctx.logger.warn('memory-accumulate: judgment failed: %o', error)
@@ -434,6 +507,18 @@ export function apply(ctx: Context, config: Config = {}): void {
         '可用 memory remember 以 handoff/<任务名> 写入（结构：目标/进度/下一步/遗留坑/相关文件），或忽略。',
       )
     }
+    if (pending.archives.length > 0) {
+      sections.push(
+        `## 归档候选（来自第 ${pending.turn} 轮）`,
+        '',
+        '系统检测到以下已有记忆可能已被推翻或过时，请确认是否归档（仅提议，不会自动执行）：',
+        ...pending.archives.flatMap((candidate, index) => [
+          `${index + 1}. ${candidate.id}：${candidate.reason}`,
+        ]),
+        '',
+        '确认后用 memory archive <id> 归档（移入 archive/，可恢复），或忽略。',
+      )
+    }
     const text = sections.join('\n')
     const desired = createUserMessage({
       content: [{ type: 'text', text }],
@@ -442,6 +527,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         turn: pending.turn,
         candidates: pending.candidates.map(candidate => candidate.title),
         handoffs: pending.handoffs.map(candidate => candidate.title),
+        archives: pending.archives.map(candidate => candidate.id),
       },
     })
     pendingCandidates.delete(agent.session)

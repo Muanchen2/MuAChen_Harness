@@ -8,6 +8,11 @@ The write-side automation half of the Rin memory system (half-automatic distilla
 
 The same judgment also proposes a handoff memo when the turn clearly leaves a task unfinished (the user says "next time", or the assistant closes with open next steps and pitfalls), so cross-session handoffs no longer rely on agent self-discipline either; the agent confirms them as `handoff/<task>` memories.
 
+Two lifecycle passes keep the stores lean:
+
+- **Auto-archive (deterministic, zero LLM):** handoff memos whose title marks them complete ("已完成") are archived automatically on every judge run — explicit state, and archive is reversible.
+- **Archive proposals (semi-automatic):** the judge names existing memories the fragment explicitly overturns (against the id-carrying existing-memory list) as `archives` proposals; the agent confirms them with `memory archive` — judgment is the system's, the destructive-ish action stays the agent's.
+
 Judgment is the system's — reliable without trusting agent self-discipline — while the write stays a conscious agent action, so noise never enters the stores silently. The `memory` tool's dedup hints (same-directory ids) then steer an accepted candidate toward updating an existing node instead of creating a duplicate.
 
 ## Plugin
@@ -32,7 +37,8 @@ Injects `llm`.
 
 - `session/event` `turn/end` → judge (per `trigger`: `on-activity` needs a `tools/result` in the turn, `always` never skips, `keyframe` needs a wrap-up wording in the latest user message or `judgeInterval` turns since the last call).
 - `session/event` `compaction/start` → rescue judge (when `rescueOnCompact`): the judge frames the pre-compaction tail synchronously before the harness replaces it with a summary, so nothing important is lost to the model's shrinking window.
-- The judge streams an auxiliary `ctx.llm` call (route from config or the latest `request/header`) over the trailing session messages framed as JSON, asking for `{"candidates":[{title, content}], "handoffs":[{title, content}]}` where `handoffs` carries unfinished-task memos (目标/进度/下一步/遗留坑/相关文件 structure); the answer is parsed tolerantly (code fences and stray prose allowed).
+- The judge streams an auxiliary `ctx.llm` call (route from config or the latest `request/header`) over the trailing session messages framed as JSON, asking for `{"candidates":[{title, content}], "handoffs":[{title, content}], "archives":[{id, reason}]}` where `handoffs` carries unfinished-task memos (目标/进度/下一步/遗留坑/相关文件 structure) and `archives` names existing memories the fragment overturns; the answer is parsed tolerantly (code fences and stray prose allowed). The existing-memory list carries ids so the judge can name stale nodes.
+- Each judge run first auto-archives completed handoff memos on the ancestor chain (title contains "已完成"), then runs the LLM judgment.
 - Both lists are deduplicated against the stored ancestor-chain memories by a second verifier call; handoff memos already present as `handoff/<task>` nodes are dropped.
 - Candidates are cached per session (`WeakMap`); the next `agent/pre-step` folds one `rin-accumulate` user message into the request and clears the cache, so candidates are presented exactly once.
 - Failures (route missing, timeout, parse failure, stream error) are logged and skipped; the session never blocks on judgment.
