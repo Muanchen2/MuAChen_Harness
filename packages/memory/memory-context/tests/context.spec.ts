@@ -8,7 +8,7 @@ import MemoryService from '../../dsh-memory/src/index.ts'
 import { agentEvents, Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { CallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ToolExecution, ToolExecutionResult, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import * as memoryContext from '../src/index.ts'
 
@@ -325,5 +325,76 @@ describe('the memory context injection', () => {
     expect(injected?.text).toContain('- [design/y] 现行方案')
     expect(injected?.text).not.toContain('过时方案')
     expect(injected?.text).not.toContain('archive/design/x')
+  })
+
+  it('recalls relevant memory summaries from turn 2 on', async () => {
+    const root = tempRoot('recall-basic')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'bugfix/enoent', title: '修复 ENOENT', content: 'store 目录缺失导致 spawn 失败，已修复' })
+    await memories.remember('workspace', workspace, { id: 'design/other', title: '无关设计', content: '某天的其他记录' })
+
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: '这个 spawn 的问题怎么处理' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const agent = stubAgent(workspace)
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    const recalls = decision.kind === 'enter'
+      ? decision.messages.filter(message => message.source.kind === 'rin-memory-recall')
+      : []
+    expect(recalls).toHaveLength(1)
+    const text = blocksText(recalls[0]?.content)
+    expect(text).toContain('相关记忆')
+    expect(text).toContain('bugfix/enoent')
+    expect(text).not.toContain('design/other')
+  })
+
+  it('does not repeat recalled memories in the same session', async () => {
+    const root = tempRoot('recall-once')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'bugfix/enoent', title: '修复 ENOENT', content: 'store 目录缺失导致 spawn 失败' })
+
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: 'spawn 报错了' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const agent = stubAgent(workspace)
+    const first = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    expect(first.kind === 'enter' && first.messages.some(m => m.source.kind === 'rin-memory-recall')).toBe(true)
+    const second = await stepDecision(ctx, agent, [userMsg], 1, 3)
+    expect(second.kind === 'enter' && second.messages.some(m => m.source.kind === 'rin-memory-recall')).toBe(false)
+  })
+
+  it('does not recall on turn 1, where the catalogue already covers memory', async () => {
+    const root = tempRoot('recall-turn1')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'bugfix/enoent', title: '修复 ENOENT', content: 'spawn 相关' })
+
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: 'spawn 问题' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const agent = stubAgent(workspace)
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 1)
+    expect(decision.kind === 'enter' && decision.messages.some(m => m.source.kind === 'rin-memory-recall')).toBe(false)
+    expect(decision.kind === 'enter' && decision.messages.some(m => m.source.kind === 'rin-memory')).toBe(true)
+  })
+
+  it('disables recall when recallTopN is 0', async () => {
+    const root = tempRoot('recall-off')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'), { recallTopN: 0 })
+    await memories.remember('workspace', workspace, { id: 'bugfix/enoent', title: '修复 ENOENT', content: 'spawn 相关' })
+
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: 'spawn 问题' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const agent = stubAgent(workspace)
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    expect(decision.kind === 'enter' && decision.messages.some(m => m.source.kind === 'rin-memory-recall')).toBe(false)
   })
 })

@@ -41,9 +41,21 @@ export interface MemoryContextSource {
   nodes: readonly { store: string; id: string }[]
 }
 
+/** Durable producer facts for one automatic-recall injection (turn 2+). */
+export interface MemoryRecallSource {
+  kind: 'rin-memory-recall'
+  /** The turn that produced the recall. */
+  readonly turn: number
+  /** The retrieval queries that were run. */
+  readonly queries: readonly string[]
+  /** The recalled node ids, in rank order. */
+  readonly nodes: readonly string[]
+}
+
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     'rin-memory': MemoryContextSource
+    'rin-memory-recall': MemoryRecallSource
   }
 }
 
@@ -51,10 +63,19 @@ declare module '@deepseek-ai/dsh-llm' {
 export interface Config {
   /** Max rendered catalogue bytes; sections beyond the budget are dropped from the tail (farthest levels first). */
   maxBytes?: number
+  /**
+   * Automatic recall from turn 2 on: each request retrieves the top-N most
+   * relevant stored memories (by keyword search over the latest user
+   * message) and injects their summaries, so the agent reasons with relevant
+   * experience at hand like a human recalling it — without being asked. Ids
+   * already recalled in this session are not repeated. `0` disables recall.
+   */
+  recallTopN?: number
 }
 
 export const Config: Schema<Config> = z.object({
   maxBytes: z.number().default(16 * 1024),
+  recallTopN: z.number().step(1).min(0).default(3),
 })
 
 /** One catalogue entry (title + id); contents are fetched on demand via the memory tool. */
@@ -125,14 +146,116 @@ function renderBounded(sections: readonly RenderSection[], maxBytes: number): st
 /** The fetch hint appended after the catalogue. */
 const CATALOGUE_HINT = '需要详细内容时，用 memory read（scope 可选 workspace/chain/central）按 id 查询。'
 
+/**
+ * Retrieval queries for automatic recall: up to two latin words (≥3 chars)
+ * plus the longest CJK segment of the user's latest message (capped at 20
+ * chars). No word segmentation exists for CJK, so the longest segment is the
+ * cheapest useful probe.
+ */
+function recallQueries(text: string): string[] {
+  const queries: string[] = []
+  const words = text.toLowerCase().match(/[a-z][a-z0-9_-]{2,}/g) ?? []
+  for (const word of words.slice(0, 2)) queries.push(word)
+  const segments = text.split(/[，。！？、；：\s]+/).filter(segment => segment.length > 0)
+  if (segments.length > 0) {
+    const longest = segments.reduce((a, b) => (b.length > a.length ? b : a))
+    if (longest.length >= 2) queries.push(longest.slice(0, 20))
+  }
+  return [...new Set(queries)].slice(0, 3)
+}
+
+/** The text of the latest user-role message in the request. */
+function lastUserText(messages: readonly UserMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message === undefined) continue
+    return message.content
+      .filter((block): block is Extract<(typeof message.content)[number], { type: 'text' }> => block.type === 'text')
+      .map(block => block.text)
+      .join(' ')
+  }
+  return ''
+}
+
+function sameRecallPayload(left: UserMessage, right: UserMessage): boolean {
+  return isDeepStrictEqual(left.content, right.content)
+    && isDeepStrictEqual(left.source, right.source)
+}
+
 /** Register the memory context injection. */
 export function apply(ctx: Context, config: Config = {}): void {
   const maxBytes = config.maxBytes ?? 16 * 1024
+  const recallTopN = config.recallTopN ?? 3
 
   const lifecycle = new AbortController()
   ctx.effect(() => () => {
     lifecycle.abort(new Error('memory-context disposed'))
   }, 'memory-context.lifecycle')
+
+  // Memory ids already recalled in this session: automatic recall never
+  // repeats what the agent already saw.
+  const recalledIds = new WeakMap<Session, Set<string>>()
+
+  /**
+   * Retrieve the top-N relevant memories for the latest user message and
+   * render their summaries as one context message. Handoff memos are
+   * excluded (they have their own pickup channel), archived nodes are
+   * already excluded by search.
+   */
+  const composeRecall = async (
+    agent: Agent,
+    messages: readonly UserMessage[],
+    turn: number,
+    signal: AbortSignal,
+  ): Promise<UserMessage | undefined> => {
+    signal.throwIfAborted()
+    const cwd = agent.session.header.cwd
+    if (cwd === undefined) return undefined
+    const queries = recallQueries(lastUserText(messages))
+    if (queries.length === 0) return undefined
+    signal.throwIfAborted()
+    const seen = recalledIds.get(agent.session) ?? new Set<string>()
+    const byId = new Map<string, { title: string; snippet: string; count: number }>()
+    for (const query of queries) {
+      try {
+        for (const entry of await ctx.memories.searchChain(cwd, query)) {
+          for (const hit of entry.hits) {
+            if (seen.has(hit.id) || hit.id.startsWith('handoff/')) continue
+            const current = byId.get(hit.id)
+            if (current === undefined || hit.matchCount > current.count) {
+              byId.set(hit.id, { title: hit.title, snippet: hit.snippet, count: hit.matchCount })
+            }
+          }
+        }
+      } catch {
+        // one failing query must not kill recall
+      }
+      signal.throwIfAborted()
+    }
+    const ranked = [...byId.entries()]
+      .sort((left, right) => right[1].count - left[1].count)
+      .slice(0, recallTopN)
+    if (ranked.length === 0) return undefined
+    for (const [id] of ranked) seen.add(id)
+    recalledIds.set(agent.session, seen)
+    const lines = [
+      `## 相关记忆（自动联想，第 ${turn} 轮）`,
+      '',
+      '与当前任务相关的既有经验摘要（按相关性排序）：',
+      ...ranked.map(([id, hit]) => `- ${id}：${hit.snippet.slice(0, 120)}`),
+      '',
+      '需要详情用 memory read 展开；与任务无关可忽略。',
+    ]
+    return createUserMessage({
+      content: [{ type: 'text', text: lines.join('\n') }],
+      source: {
+        kind: 'rin-memory-recall',
+        turn,
+        queries,
+        nodes: ranked.map(([id]) => id),
+      },
+    })
+  }
 
   const compose = async (agent: Agent, signal: AbortSignal): Promise<UserMessage | undefined> => {
     signal.throwIfAborted()
@@ -245,13 +368,23 @@ export function apply(ctx: Context, config: Config = {}): void {
     agentRefs.set(agent.session, agent)
     turnState.set(agent.session, turn)
     const decision = await next()
-    // Only the first turn carries the automatic memory context. Later turns
+    // Only the first turn carries the automatic memory catalogue. Later turns
     // already hold it in the session history, and re-injecting the payload on
-    // every request wastes the context budget; from turn 2 on the agent
-    // queries memory through the `memory` tool instead.
+    // every request wastes the context budget; from turn 2 on the agent gets
+    // automatic recall instead: the top-N relevant memory summaries for the
+    // latest user message, so reasoning happens with experience at hand.
     if (turn !== 1) {
       for (const message of agent.inbox.nextStep.filter(isMemoryContext)) {
         agent.inbox.remove(message.id)
+      }
+      if (recallTopN > 0 && decision.kind === 'enter' && decision.messages.length > 0) {
+        const recall = await composeRecall(agent, messages, turn, signal)
+        signal.throwIfAborted()
+        if (recall !== undefined && !decision.messages.some(message => sameRecallPayload(message, recall))) {
+          const lastClaimedIndex = decision.messages.findLastIndex(message => messages.includes(message))
+          const entered = decision.messages.toSpliced(lastClaimedIndex + 1, 0, recall)
+          return { kind: 'enter', messages: entered }
+        }
       }
       return decision
     }
