@@ -118,3 +118,14 @@ export interface SearchHit {
   readonly snippet: string
   readonly matchCount: number
 }
+
+/**
+ * The unified diff of a node's most recent change.
+ * @param id - the node id.
+ * @param diff - diff text; empty when the node was created exactly once and
+ *   has nothing to diff yet.
+ */
+export interface NodeDiff {
+  readonly id: string
+  readonly diff: string
+}

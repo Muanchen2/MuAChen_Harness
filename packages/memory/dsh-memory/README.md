@@ -16,6 +16,8 @@ Skills are methods — how to do something, stable and reusable. Memories are ex
 - `searchChain(workspace, query)` — The same search over every store on the ancestor chain plus the central store, one entry per store with hits.
 - `list(scope, workspace, prefix?)` — The sorted memory ids in a store, scanned recursively; without a `prefix`, archived ids (`archive/…`) are hidden.
 - `timeline(scope, workspace, id)` — The node's complete per-file change history, newest first. The earliest commit is `created`, later commits `updated`; every entry carries its backing git `revision`, so future revert/diff operations can address it. Renames are followed (`git log --follow`), so a node moved into a hierarchy keeps its pre-move history.
+- `diff(scope, workspace, id)` — Unified diff of the node's most recent change (empty when it was created exactly once).
+- `revert(scope, workspace, id, revision)` — Restore the node to a past `timeline` revision, committed as a new change so the revert itself stays on the timeline.
 - `remove(scope, workspace, id)` — Permanently delete a node (committed; revertable through git history). Throws when the node is absent.
 - `archive(scope, workspace, id)` / `unarchive(scope, workspace, id)` — Move a node to `archive/<id>` and back, each committed. Archived nodes leave `list` and context injection but stay readable as `archive/<id>`; `unarchive` accepts the archived or the bare id.
 - `ancestorStores(workspace)` — The existing `.dsh-memory` stores along `workspace`'s ancestor chain, nearest first, ending at the filesystem root. Absent levels are skipped and never created.
@@ -74,4 +76,3 @@ No direct prompt effect; the consumer owns any model-facing rendering.
 ## Known Limitations and Deferred Work
 
 - **Chain reads are flat merges, not ranked retrieval** — every level renders up to `maxBytes`; relevance ranking and tag/weight models are deferred to the Rin tree model.
-- **No revert/diff yet** — timeline entries carry revisions, but `revert` (check out an older revision of a node) and `diff` (show what a revision changed) are not yet exposed as service operations.

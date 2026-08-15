@@ -410,6 +410,40 @@ describe('the memory service over a git-backed store', () => {
     expect((await memories.read('workspace', workspace, 'retry/me'))?.node.content).toBe('v1')
   })
 
+  it('diffs the most recent change of a node', async () => {
+    const root = tempRoot('diff-node')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'v1' })
+    expect((await memories.diff('workspace', workspace, 'design/x')).diff).toBe('')
+
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'v2' })
+    const result = await memories.diff('workspace', workspace, 'design/x')
+    expect(result.diff).toContain('-v1')
+    expect(result.diff).toContain('+v2')
+
+    await expect(memories.diff('workspace', workspace, 'nope')).rejects.toThrow(/no memory "nope" to diff/)
+  })
+
+  it('reverts a node to a previous revision, keeping the revert on the timeline', async () => {
+    const root = tempRoot('revert-node')
+    const workspace = join(root, 'ws')
+    const { memories } = await service(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'v1' })
+    await memories.remember('workspace', workspace, { id: 'design/x', title: 'X', content: 'v2 bad' })
+    const v1Revision = (await memories.timeline('workspace', workspace, 'design/x')).at(-1)?.revision
+    expect(v1Revision).toBeDefined()
+
+    const reverted = await memories.revert('workspace', workspace, 'design/x', v1Revision!)
+    expect(reverted.node.content).toBe('v1')
+    expect(reverted.timeline[0]?.message).toBe(`memory: revert design/x to ${v1Revision!.slice(0, 12)}`)
+    // the revert itself is a new change; the history is never lost
+    expect(reverted.timeline).toHaveLength(3)
+
+    await expect(memories.revert('workspace', workspace, 'design/x', '0000000000000000000000000000000000000000'))
+      .rejects.toThrow(/revision .* does not contain "design\/x"/)
+  })
+
   it('merges a branch cleanly and reports the brought-in nodes', async () => {
     const root = tempRoot('merge-clean')
     const workspace = join(root, 'ws')

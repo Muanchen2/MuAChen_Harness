@@ -30,10 +30,11 @@ import type {
   MemoryWriteResult,
   MergeConflict,
   MergeResult,
+  NodeDiff,
   SearchHit,
 } from './types.ts'
 
-export type { ChainContent, ChainStore, MergeConflict, MergeResult, SearchHit } from './types.ts'
+export type { ChainContent, ChainStore, MergeConflict, MergeResult, NodeDiff, SearchHit } from './types.ts'
 
 /** How many search hits one query returns, best match first. */
 const SEARCH_MAX_HITS = 10
@@ -240,6 +241,57 @@ export class MemoryService extends Service {
   async timeline(scope: MemoryScope, workspace: string | undefined, id: string): Promise<MemoryTimelineEntry[]> {
     const dir = await this.resolveStore(scope, workspace)
     return this.timelineAt(dir, nodePath(id))
+  }
+
+  /**
+   * Unified diff of a node's most recent change.
+   * @param scope - which store to read from.
+   * @param workspace - workspace path (used only for `scope: 'workspace'`).
+   * @param id - the memory node id.
+   * @returns the diff, with an empty `diff` when the node was created exactly once.
+   * @throws when the node has no history (does not exist).
+   */
+  async diff(scope: MemoryScope, workspace: string | undefined, id: string): Promise<NodeDiff> {
+    const dir = await this.resolveStore(scope, workspace)
+    const entries = await this.timelineAt(dir, nodePath(id))
+    if (entries.length === 0) throw new Error(`memory: no memory "${id}" to diff`)
+    if (entries.length < 2) return { id, diff: '' }
+    const previous = entries[1]
+    if (previous === undefined) return { id, diff: '' }
+    const diff = await this.git.diffFile(dir, nodePath(id), previous.revision, 'HEAD')
+    return { id, diff: diff ?? '' }
+  }
+
+  /**
+   * Restore a node to a previous revision, committed as a new change. The
+   * revert itself lands on the timeline, so nothing is ever lost.
+   * @param scope - which store to operate on.
+   * @param workspace - workspace path (used only for `scope: 'workspace'`).
+   * @param id - the memory node id.
+   * @param revision - the git revision to restore (from `timeline`).
+   * @returns the reverted node and its updated timeline.
+   * @throws when the revision does not contain the node.
+   */
+  async revert(
+    scope: MemoryScope,
+    workspace: string | undefined,
+    id: string,
+    revision: string,
+  ): Promise<MemoryWriteResult> {
+    return serializeWrite(async () => {
+      const dir = await this.resolveStore(scope, workspace)
+      const relPath = nodePath(id)
+      const content = await this.git.showFile(dir, revision, relPath)
+      if (content === undefined) {
+        throw new Error(`memory: revision "${revision}" does not contain "${id}"`)
+      }
+      await writeUtf8(join(dir, relPath), content)
+      await this.git.commit(dir, `memory: revert ${id} to ${revision.slice(0, 12)}`)
+      return {
+        node: { id, title: firstHeading(content) ?? id, content: stripHeading(content), scope, branch: 'default' },
+        timeline: await this.timeline(scope, workspace, id),
+      }
+    })
   }
 
   /**

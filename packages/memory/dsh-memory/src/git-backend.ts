@@ -118,12 +118,18 @@ export class GitBackend {
     // hierarchy directory keeps its pre-move history.
     const result = await this.git(dir, ['log', '--follow', '--format=%H%x00%cI%x00%s%x00', '--', relPath])
     if (result.code !== 0 || result.stdout === '') return []
-    const fields = result.stdout.split('\0')
+    // Git emits one record per line (`hash NUL time NUL message NUL` then a
+    // newline); splitting the whole buffer on NUL would fold the newline into
+    // the next record's hash, so records are split on `\n` first and NUL
+    // fields within each line.
     const entries: Array<{ revision: string; at: string; message: string }> = []
-    for (let index = 0; index + 2 < fields.length; index += 3) {
-      const revision = fields[index]
-      const at = fields[index + 1]
-      const message = fields[index + 2]
+    for (const line of result.stdout.split('\n')) {
+      const clean = line.endsWith('\r') ? line.slice(0, -1) : line
+      if (clean === '') continue
+      const fields = clean.split('\0')
+      const revision = fields[0]
+      const at = fields[1]
+      const message = fields[2]
       if (revision !== undefined && at !== undefined && message !== undefined) {
         entries.push({ revision, at, message })
       }
@@ -208,6 +214,19 @@ export class GitBackend {
   async diffFiles(dir: string, fromRev: string, toRev: string): Promise<string[]> {
     const result = await this.git(dir, ['diff', '--name-only', `${fromRev}..${toRev}`])
     return result.stdout.split('\n').map(line => line.trim()).filter(line => line !== '')
+  }
+
+  /**
+   * Unified diff text of one store-relative file between two revisions.
+   * @param dir - the memory store directory.
+   * @param relPath - store-relative path.
+   * @param fromRev - the older revision.
+   * @param toRev - the newer revision.
+   * @returns the diff text, or undefined when git reports no diff.
+   */
+  async diffFile(dir: string, relPath: string, fromRev: string, toRev: string): Promise<string | undefined> {
+    const result = await this.git(dir, ['diff', `${fromRev}..${toRev}`, '--', relPath])
+    return result.code === 0 ? result.stdout : undefined
   }
 
   /** Abort an in-progress merge, restoring the pre-merge working tree. */

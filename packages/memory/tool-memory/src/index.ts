@@ -46,7 +46,8 @@ const MEMORY_GUIDANCE = '使用 memory 工具持久化与回顾跨会话的项�
   + '结论更新到目标节点后再重试。**任务未完成需要交接时，写 handoff/<任务名> 交接单（结构：目标/进度/'
   + '下一步/遗留坑/相关文件）。**记忆维护：被推翻或过时的结论用 memory archive 归档（移入 archive/，'
   + '不再注入和列出，可 memory read archive/<id> 或 memory list archive/ 找回，memory unarchive 恢复）；'
-  + '误写、测试或临时记录用 memory remove 彻底删除（git 历史仍可追溯）。记忆保持事实性与简洁；'
+  + '误写、测试或临时记录用 memory remove 彻底删除（git 历史仍可追溯）；写错的内容用 memory diff 查看'
+  + '最近变更、memory revert <id> 配合 timeline 里的 revision 恢复到历史版本。记忆保持事实性与简洁；'
   + '可复用的方法存入 skills，经验存入 memory。'
 
 const OUTPUT = {
@@ -72,10 +73,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     name: 'memory',
     description: 'Persist or recall cross-session project experience (memory), distinct from skills (methods).',
     parameters: {
-      action: { type: 'string', required: true, enum: ['remember', 'read', 'list', 'search', 'timeline', 'branch', 'checkout', 'current-branch', 'list-branches', 'merge', 'remove', 'archive', 'unarchive'] },
+      action: { type: 'string', required: true, enum: ['remember', 'read', 'list', 'search', 'timeline', 'diff', 'revert', 'branch', 'checkout', 'current-branch', 'list-branches', 'merge', 'remove', 'archive', 'unarchive'] },
       scope: { type: 'string', required: true, enum: ['workspace', 'central', 'chain'] },
       id: { type: 'string', description: 'Memory node id for read/timeline, or the id to save under for remember.' },
       query: { type: 'string', description: 'Full-text search query for memory search (case-insensitive literal match over node bodies).' },
+      revision: { type: 'string', description: 'Git revision to restore for revert (take it from timeline output).' },
       title: { type: 'string', description: 'Title for remember; the new memory heading.' },
       content: { type: 'string', description: 'Body for remember; the experience to persist.' },
       message: { type: 'string', description: 'Optional one-line commit note for this change.' },
@@ -95,13 +97,16 @@ export function apply(ctx: Context, config: Config = {}): void {
 async function renderMemory(
   memories: MemoryService,
   cwd: string | undefined,
-  args: { action: string; scope: 'workspace' | 'central' | 'chain'; id?: string; query?: string; title?: string; content?: string; message?: string; strategy?: string; prefix?: string },
+  args: { action: string; scope: 'workspace' | 'central' | 'chain'; id?: string; query?: string; revision?: string; title?: string; content?: string; message?: string; strategy?: string; prefix?: string },
 ): Promise<string> {
   const scope = args.scope
   const workspace = scope === 'workspace' ? cwd : undefined
   /** Narrow the scope for branch operations: chain has no branchable store. */
   const branchScope = (): MemoryScope | { error: string } =>
     scope === 'chain' ? { error: 'memory:branch operations require workspace or central scope' } : scope
+  /** Narrow the scope for per-store read/write operations that need one concrete store. */
+  const storeScope = (): MemoryScope | { error: string } =>
+    scope === 'chain' ? { error: 'memory:this action requires workspace or central scope' } : scope
   switch (args.action) {
     case 'branch': {
       const target = branchScope()
@@ -231,6 +236,23 @@ async function renderMemory(
       return timeline.length === 0
         ? `no timeline for memory "${args.id}"`
         : timeline.map(entry => `${entry.at} ${entry.action} ${entry.revision} ${entry.message}`).join('\n')
+    }
+    case 'diff': {
+      const target = storeScope()
+      if (typeof target !== 'string') return target.error
+      if (args.id === undefined) return 'memory:diff requires an id'
+      const result = await memories.diff(target, workspace, args.id)
+      return result.diff === ''
+        ? `memory ${args.id}: created once, nothing to diff`
+        : `diff of ${args.id} (last change):\n${result.diff}`
+    }
+    case 'revert': {
+      const target = storeScope()
+      if (typeof target !== 'string') return target.error
+      if (args.id === undefined) return 'memory:revert requires an id'
+      if (args.revision === undefined) return 'memory:revert requires the revision to restore (revision)'
+      const result = await memories.revert(target, workspace, args.id, args.revision)
+      return renderNode(result.node, result.timeline)
     }
     default:
       return `unknown memory action "${args.action}"`
