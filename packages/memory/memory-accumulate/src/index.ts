@@ -78,6 +78,14 @@ export interface Config {
   timeoutMs?: number
   /** Keyframe fallback: judge at least every N turns (keyframe trigger only). */
   judgeInterval?: number
+  /**
+   * Rescue judgment before session compaction: when the harness compacts a
+   * long conversation into a summary, the pre-compaction tail would otherwise
+   * be invisible to the model forever. On `compaction/start` the plugin frames
+   * the tail synchronously (before the replacement lands) and runs one judge
+   * pass, so experience and handoff needs are distilled into memory first.
+   */
+  rescueOnCompact?: boolean
   /** Optional explicit provider route; must be paired with `model`. */
   provider?: string
   /** Optional explicit model id; must be paired with `provider`. */
@@ -92,6 +100,7 @@ export const Config: Schema<Config> = z.object({
   maxOutputTokens: z.number().step(1).min(1).default(512),
   timeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(30_000),
   judgeInterval: z.number().step(1).min(1).default(6),
+  rescueOnCompact: z.boolean().default(true),
   provider: z.string(),
   model: z.string(),
 })
@@ -311,6 +320,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const maxOutputTokens = config.maxOutputTokens ?? 512
   const timeoutMs = config.timeoutMs ?? 30_000
   const judgeInterval = config.judgeInterval ?? 6
+  const rescueOnCompact = config.rescueOnCompact ?? true
 
   const judge = async (session: Session, turn: number): Promise<void> => {
     try {
@@ -354,6 +364,20 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   ctx.on('session/event', (session, event) => {
+    // `compaction/start` is declared by @deepseek-ai/dsh-compaction's type
+    // merge; we avoid a cross-package type dependency and narrow it locally.
+    const eventType = (event as { type?: string }).type
+    if (eventType === 'compaction/start') {
+      // Rescue pass: compaction is about to replace the conversation tail
+      // with a summary. `judge` frames the tail synchronously (its first
+      // await comes after frameMessages), so the pre-compaction messages are
+      // captured here regardless of when the async LLM work settles.
+      if (rescueOnCompact) {
+        const turn = (event as { data?: { turn?: number | null } }).data?.turn
+        void judge(session, turn ?? 0)
+      }
+      return
+    }
     if (event.type !== 'turn/end') return
     const active = activeTurns.delete(session)
     const turn = event.data.turn

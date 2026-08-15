@@ -25,11 +25,13 @@ Injects `llm`.
 | `maxOutputTokens` | `512` | Judge output-token cap. |
 | `timeoutMs` | `30000` | Judge request deadline. |
 | `judgeInterval` | `6` | Keyframe fallback: judge at least every N turns (keyframe trigger only). |
+| `rescueOnCompact` | `true` | Rescue judgment before session compaction: `compaction/start` frames the conversation tail synchronously and runs one judge pass, so experience is distilled before the summary replaces it. |
 | `provider` / `model` | — | Explicit route; defaults to the session's latest `request/header` route. |
 
 ## Design
 
 - `session/event` `turn/end` → judge (per `trigger`: `on-activity` needs a `tools/result` in the turn, `always` never skips, `keyframe` needs a wrap-up wording in the latest user message or `judgeInterval` turns since the last call).
+- `session/event` `compaction/start` → rescue judge (when `rescueOnCompact`): the judge frames the pre-compaction tail synchronously before the harness replaces it with a summary, so nothing important is lost to the model's shrinking window.
 - The judge streams an auxiliary `ctx.llm` call (route from config or the latest `request/header`) over the trailing session messages framed as JSON, asking for `{"candidates":[{title, content}], "handoffs":[{title, content}]}` where `handoffs` carries unfinished-task memos (目标/进度/下一步/遗留坑/相关文件 structure); the answer is parsed tolerantly (code fences and stray prose allowed).
 - Both lists are deduplicated against the stored ancestor-chain memories by a second verifier call; handoff memos already present as `handoff/<task>` nodes are dropped.
 - Candidates are cached per session (`WeakMap`); the next `agent/pre-step` folds one `rin-accumulate` user message into the request and clears the cache, so candidates are presented exactly once.

@@ -381,4 +381,34 @@ describe('the memory accumulation plugin', () => {
     }
     await vi.waitFor(() => { expect(adapter.requests.length).toBe(2) })
   })
+
+  it('rescues experience before session compaction', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      textChunks(JSON.stringify({ candidates: [{ title: '压缩前结论', content: '重要经验' }], handoffs: [] })),
+    ]))
+    const agent = stubAgent()
+    // a compaction about to replace the conversation tail triggers a judge
+    ctx.emit('session/event', agent.session, {
+      type: 'compaction/start', seq: 1, time: 1, data: { turn: 7 },
+    } as never)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+
+    // the rescued candidate is presented at the next step boundary
+    const decision = await stepDecision(ctx, agent, [userPrompt])
+    const [injected] = accumulateMessages(decision)
+    expect(injected).toBeDefined()
+    expect(injected?.text).toContain('压缩前结论')
+  })
+
+  it('skips the rescue pass when rescueOnCompact is disabled', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      textChunks(JSON.stringify({ candidates: [], handoffs: [] })),
+    ]), { rescueOnCompact: false })
+    const agent = stubAgent()
+    ctx.emit('session/event', agent.session, {
+      type: 'compaction/start', seq: 1, time: 1, data: { turn: 7 },
+    } as never)
+    await new Promise(resolve => setTimeout(resolve, 80))
+    expect(adapter.requests).toEqual([])
+  })
 })
