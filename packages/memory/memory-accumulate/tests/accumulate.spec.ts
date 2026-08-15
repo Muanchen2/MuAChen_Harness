@@ -382,6 +382,17 @@ describe('the memory accumulation plugin', () => {
     await vi.waitFor(() => { expect(adapter.requests.length).toBe(2) })
   })
 
+  it('judges on an explicit task-switch wording under the keyframe trigger', async () => {
+    const { ctx, adapter } = await liveContext(new FakeAdapter([
+      textChunks(JSON.stringify({ candidates: [], handoffs: [] })),
+    ]), { trigger: 'keyframe' })
+    // "还有…" openly opens a new task: the previous task's experience
+    // deserves a judge pass before it slips away
+    const agent = stubAgent(undefined, [userEvent('还有这个 gpt 的，帮我一起配到 harness 吧', 0)])
+    endTurn(ctx, agent, 1)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+  })
+
   it('rescues experience before session compaction', async () => {
     const { ctx, adapter } = await liveContext(new FakeAdapter([
       textChunks(JSON.stringify({ candidates: [{ title: '压缩前结论', content: '重要经验' }], handoffs: [] })),

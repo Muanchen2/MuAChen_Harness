@@ -151,15 +151,19 @@ const lastJudged = new WeakMap<Session, number>()
 
 /**
  * Keyframe pre-filter: a turn is worth one judge call when the latest real
- * user message wraps the task up in explicit wording (a direct expression of
- * the user's intent, not a heuristic guess). The fallback interval then
- * guarantees a judge call every `judgeInterval` turns regardless. Whether a
- * turn is a real keyframe (task switch, meaningful progress) is left to the
- * judge itself, which is instructed to output nothing for ordinary progress.
- * Topic-shift guessing was tried and removed: without Chinese word
- * segmentation, shared character fragments are coincidence, not topic.
+ * user message carries an explicit keyframe signal — wrap-up wording (a
+ * direct expression of the user's intent, not a heuristic guess) or an
+ * explicit task-switch marker ("还有/另外/顺便/接下来…": the user openly
+ * opens a new task, so the PREVIOUS task's experience deserves distilling
+ * before it slips away). The fallback interval then guarantees a judge call
+ * every `judgeInterval` turns regardless. Whether a turn is a real keyframe
+ * (task switch, meaningful progress) is left to the judge itself, which is
+ * instructed to output nothing for ordinary progress. Topic-shift guessing
+ * was tried and removed: without Chinese word segmentation, shared character
+ * fragments are coincidence, not topic — but explicit switch words are
+ * intent, not guessing.
  */
-const WRAPUP_RE = /(先到(这|这儿|这里)?|就到这|先这样|差不多了|收尾|总结一下|总结下|结束(吧|了)?|下次(再|继续)|明天(再|继续)|交接|handoff|待办)/i
+const KEYFRAME_RE = /(先到(这|这儿|这里)?|就到这|先这样|差不多了|收尾|总结一下|总结下|结束(吧|了)?|下次(再|继续)|明天(再|继续)|交接|handoff|待办|还有|另外|顺便|接下来|换个|再帮|现在(做|来|弄)|新任务)/i
 
 /** Real user messages on the durable event stream, oldest first, with their seq. */
 function userTextsOf(session: Session): Array<{ at: number; text: string }> {
@@ -185,7 +189,7 @@ function userTextsOf(session: Session): Array<{ at: number; text: string }> {
 /** Whether the turn deserves a judge call under the keyframe trigger. */
 function isKeyframe(session: Session): boolean {
   const latest = userTextsOf(session).at(-1)
-  return latest !== undefined && WRAPUP_RE.test(latest.text)
+  return latest !== undefined && KEYFRAME_RE.test(latest.text)
 }
 
 /**
