@@ -5,10 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import MemoryService from '../../dsh-memory/src/index.ts'
+import LlmRuntime, { CallId, LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { agentEvents, Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
-import { CallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ToolExecution, ToolExecutionResult, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import * as memoryContext from '../src/index.ts'
 
@@ -26,16 +27,51 @@ function tempRoot(label: string): string {
   return root
 }
 
+/** Minimal scripted adapter: each model call consumes the next script entry. */
+class FakeAdapter extends LlmAdapter {
+  requests: GenerateOptions[] = []
+  constructor(private readonly script: (StreamChunk[] | 'fail')[]) {
+    super()
+  }
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options)
+    const entry = this.script.shift()
+    if (entry === undefined) throw new Error('adapter script exhausted')
+    if (entry === 'fail') throw new Error('adapter exploded')
+    for (const chunk of entry) {
+      if (options.signal?.aborted) throw new Error('aborted')
+      yield chunk
+    }
+  }
+}
+
+function textChunks(text: string): StreamChunk[] {
+  return [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
+    { type: 'usage', usage: { inputTokens: 10, outputTokens: text.length } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+}
+
 async function liveContext(
   centralRoot: string,
   config: memoryContext.Config = {},
-): Promise<{ ctx: Context; memories: MemoryService }> {
+  adapter?: FakeAdapter,
+): Promise<{ ctx: Context; memories: MemoryService; adapter: FakeAdapter }> {
   const ctx = new Context()
   contexts.push(ctx)
+  await ctx.plugin(LlmRuntime)
+  const llmAdapter = adapter ?? new FakeAdapter([])
+  ctx.llm.registerAdapter(['mock'], llmAdapter)
   await ctx.plugin(LocalSubprocessRuntime)
   await ctx.plugin(MemoryService, { centralRoot })
-  await ctx.plugin(memoryContext, config)
-  return { ctx, memories: ctx.memories }
+  await ctx.plugin(memoryContext, Object.assign({ provider: 'mock', model: 'm' }, config))
+  return { ctx, memories: ctx.memories, adapter: llmAdapter }
 }
 
 const testSignal = new AbortController().signal
@@ -466,6 +502,145 @@ describe('the memory context injection', () => {
     expect(blocksText(recalls[0]?.content)).toContain('bugfix/beta')
   })
 
+  it('reserves the user\'s intent words even when the context is noisy', async () => {
+    const root = tempRoot('recall-user-first')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'bugfix/recall', title: '联想修复', content: '记忆联想机制 bug 修复记录' })
+    await memories.remember('workspace', workspace, { id: 'bugfix/other', title: '其他', content: '无关内容' })
+
+    // The previous turn ends with a noisy tool summary and a long assistant
+    // narration carrying a path — exactly the context that used to crowd the
+    // user's own words out of the query budget entirely.
+    const seed: SessionEvent[] = [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      {
+        type: 'tool/result', seq: 1, time: 1, surfaceOp: 'append',
+        data: {
+          message: {
+            id: 't1', role: 'user', source: { kind: 'tool', name: 'pwsh', callId: 'c1' },
+            content: [{
+              type: 'tool-result',
+              content: [{ type: 'text', text: 'Found 0 warnings and 0 errors. Finished in 1.8s on 3 files with 89 rules using 20 threads' }],
+              toolCallId: 'c1',
+            }],
+          },
+        },
+      },
+      {
+        type: 'user/message', seq: 2, time: 1, surfaceOp: 'append',
+        data: {
+          id: 'u1', role: 'user', source: { kind: 'model' },
+          content: [{ type: 'text', text: '搞定啦。凛把 packages/memory/memory-accumulate/tsconfig.json 的构建问题全部收尾了' }],
+        },
+      },
+      { type: 'turn/end', seq: 3, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+    ] as unknown as SessionEvent[]
+    const agent = stubAgent(workspace, seed)
+    // The user's own words ("bug") are the intent; the noisy tool summary
+    // ("found"/"warnings") and the long path must not crowd them out.
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: '记忆联想机制好像没触发，是不是那个又卡出什么bug了' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    const recalls = decision.kind === 'enter'
+      ? decision.messages.filter(message => message.source.kind === 'rin-memory-recall')
+      : []
+    expect(recalls).toHaveLength(1)
+    const text = blocksText(recalls[0]?.content)
+    expect(text).toContain('bugfix/recall')
+    expect(text).not.toContain('bugfix/other')
+  })
+
+  it('recalls from concrete entities in the latest reasoning block', async () => {
+    const root = tempRoot('recall-reasoning-entities')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, {
+      id: 'bugfix/session-corrupt', title: '会话日志损坏修复', content: 'session-38253fc8 日志损坏修复：seq 必须连续',
+    })
+    await memories.remember('workspace', workspace, { id: 'design/other', title: '无关设计', content: '无关内容' })
+
+    // The agent's latest reasoning names the concrete session id it is about
+    // to inspect — a grounded fact of the current thinking, not speculation.
+    const seed: SessionEvent[] = [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      {
+        type: 'assistant/message', seq: 1, time: 1, surfaceOp: 'append',
+        data: {
+          turn: 1, step: 1,
+          message: {
+            id: 'a1', role: 'assistant',
+            source: { kind: 'model', provider: 'mock', model: 'mock' },
+            content: [
+              { type: 'reasoning', text: 'session-38253fc8 正是之前 resume 失败的那个会话。看看里面有什么。' },
+              { type: 'text', text: '我看看那个会话的日志。' },
+            ],
+          },
+        },
+      },
+      { type: 'turn/end', seq: 2, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+    ] as unknown as SessionEvent[]
+    const agent = stubAgent(workspace, seed)
+    // The user prompt itself carries no probe; the reasoning block's session
+    // id must drive the recall.
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: '继续处理' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    const recalls = decision.kind === 'enter'
+      ? decision.messages.filter(message => message.source.kind === 'rin-memory-recall')
+      : []
+    expect(recalls).toHaveLength(1)
+    const text = blocksText(recalls[0]?.content)
+    expect(text).toContain('bugfix/session-corrupt')
+    expect(text).not.toContain('design/other')
+  })
+
+  it('keeps speculative reasoning wording out of recall queries', async () => {
+    const root = tempRoot('recall-reasoning-speculation')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, {
+      id: 'bugfix/enoent', title: '修复 ENOENT', content: 'spawn git ENOENT 找不到 git 可执行文件',
+    })
+
+    // Reasoning full of speculation ("可能/也许/大概") carries no concrete
+    // entity; the user prompt carries no probe either — recall must stay quiet.
+    const seed: SessionEvent[] = [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      {
+        type: 'assistant/message', seq: 1, time: 1, surfaceOp: 'append',
+        data: {
+          turn: 1, step: 1,
+          message: {
+            id: 'a1', role: 'assistant',
+            source: { kind: 'model', provider: 'mock', model: 'mock' },
+            content: [
+              { type: 'reasoning', text: '这可能是环境问题，也许需要换个思路，大概再想想。' },
+              { type: 'text', text: '我先继续。' },
+            ],
+          },
+        },
+      },
+      { type: 'turn/end', seq: 2, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+    ] as unknown as SessionEvent[]
+    const agent = stubAgent(workspace, seed)
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: '继续' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    const recalls = decision.kind === 'enter'
+      ? decision.messages.filter(message => message.source.kind === 'rin-memory-recall')
+      : []
+    // No concrete entity in reasoning and no probe in the prompt: nothing to
+    // retrieve, so no recall injection at all.
+    expect(recalls).toHaveLength(0)
+  })
+
   it('filters error-noise words out of recall queries', async () => {
     const root = tempRoot('recall-noise')
     const workspace = join(root, 'ws')
@@ -501,6 +676,98 @@ describe('the memory context injection', () => {
     expect(recalls).toHaveLength(1)
     // `syntaxerror` is noise; `alpha` (the real keyword) must carry the query.
     expect(blocksText(recalls[0]?.content)).toContain('bugfix/alpha')
+  })
+
+  it('injects keyword order directly when candidates fit the budget (zero LLM)', async () => {
+    const root = tempRoot('recall-no-rerank')
+    const workspace = join(root, 'ws')
+    const adapter = new FakeAdapter([])
+    const { ctx, memories } = await liveContext(join(root, 'central'), {}, adapter)
+    await memories.remember('workspace', workspace, { id: 'bugfix/alpha', title: 'Alpha', content: 'alpha 相关' })
+    await memories.remember('workspace', workspace, { id: 'bugfix/beta', title: 'Beta', content: 'beta 相关' })
+
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: 'alpha 问题' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const agent = stubAgent(workspace)
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    const recalls = decision.kind === 'enter'
+      ? decision.messages.filter(message => message.source.kind === 'rin-memory-recall')
+      : []
+    expect(recalls).toHaveLength(1)
+    expect(blocksText(recalls[0]?.content)).toContain('bugfix/alpha')
+    // Only one candidate matched, so no LLM re-rank call happened.
+    expect(adapter.requests).toHaveLength(0)
+  })
+
+  it('re-ranks candidates with one LLM call when the keyword pass over-produces', async () => {
+    const root = tempRoot('recall-rerank')
+    const workspace = join(root, 'ws')
+    // Five keyword matches (all share the probe word), only 3 fit the budget
+    // — the re-rank judge picks which three.
+    const adapter = new FakeAdapter([textChunks('bugfix/echo\nbugfix/alpha\nbugfix/charlie')])
+    const { ctx, memories } = await liveContext(join(root, 'central'), { recallTopN: 3, recallCandidates: 10 }, adapter)
+    for (const [id, content] of [
+      ['bugfix/alpha', 'alpha shared 相关经验'],
+      ['bugfix/beta', 'beta shared 相关经验'],
+      ['bugfix/charlie', 'charlie shared 相关经验'],
+      ['bugfix/delta', 'delta shared 相关经验'],
+      ['bugfix/echo', 'echo shared 相关经验'],
+    ] as const) {
+      await memories.remember('workspace', workspace, { id, title: id, content })
+    }
+
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: 'shared 问题，帮我看看' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const agent = stubAgent(workspace)
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    const recalls = decision.kind === 'enter'
+      ? decision.messages.filter(message => message.source.kind === 'rin-memory-recall')
+      : []
+    expect(recalls).toHaveLength(1)
+    const text = blocksText(recalls[0]?.content)
+    // The judge's picks come first; the top-3 budget is respected.
+    expect(text.indexOf('bugfix/echo')).toBeLessThan(text.indexOf('bugfix/alpha'))
+    expect(text.indexOf('bugfix/alpha')).toBeLessThan(text.indexOf('bugfix/charlie'))
+    expect(text).not.toContain('bugfix/delta')
+    expect(text).not.toContain('bugfix/beta')
+    // Exactly one auxiliary LLM call for the re-rank.
+    expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('falls back to keyword order when the re-rank call fails', async () => {
+    const root = tempRoot('recall-rerank-fail')
+    const workspace = join(root, 'ws')
+    const adapter = new FakeAdapter(['fail'])
+    const { ctx, memories } = await liveContext(join(root, 'central'), { recallTopN: 2, recallCandidates: 10 }, adapter)
+    for (const [id, content] of [
+      ['bugfix/alpha', 'alpha shared 相关经验'],
+      ['bugfix/beta', 'beta shared 相关经验'],
+      ['bugfix/charlie', 'charlie shared 相关经验'],
+    ] as const) {
+      await memories.remember('workspace', workspace, { id, title: id, content })
+    }
+
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: 'shared 问题，帮我看看' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const agent = stubAgent(workspace)
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    const recalls = decision.kind === 'enter'
+      ? decision.messages.filter(message => message.source.kind === 'rin-memory-recall')
+      : []
+    expect(recalls).toHaveLength(1)
+    const text = blocksText(recalls[0]?.content)
+    // Re-rank failed, so the keyword order survives; 2 of 3 fit the budget.
+    expect(text).toContain('bugfix/alpha')
+    expect(text).toContain('bugfix/beta')
+    expect(text).not.toContain('bugfix/charlie')
+    // The failing re-rank consumed exactly one scripted call.
+    expect(adapter.requests).toHaveLength(1)
   })
 
   it('does not repeat recalled memories in the same session', async () => {

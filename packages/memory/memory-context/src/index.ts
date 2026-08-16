@@ -19,15 +19,16 @@ import type { Context } from '@deepseek-ai/cordis'
 import { isDeepStrictEqual } from 'node:util'
 import { dirname, relative } from 'node:path'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type Message } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createUserMessage, deepFreeze, type FinishReason, type GenerateOptions, type Message } from '@deepseek-ai/dsh-llm'
 import type { ChainContent } from '@deepseek-ai/dsh-memory'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import { deadline, MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 
 export const name = 'memory-context'
-export const inject = ['memories']
+export const inject = ['memories', 'llm']
 
 /** The central store's label inside an injected source. */
 const CENTRAL_LABEL = 'central'
@@ -64,20 +65,41 @@ export interface Config {
   /** Max rendered catalogue bytes; sections beyond the budget are dropped from the tail (farthest levels first). */
   maxBytes?: number
   /**
-   * Automatic recall from turn 2 on: each request retrieves the top-N most
-   * relevant stored memories (by keyword search over the recent execution
-   * context — the latest tool results and assistant replies first, then the
-   * user's latest message) and injects their summaries, so the agent reasons
-   * with relevant experience at hand like a human recalling it — without
-   * being asked. Ids already recalled in this session are not repeated. `0`
-   * disables recall.
+   * Automatic recall from turn 2 on: each request retrieves the most relevant
+   * stored memories and injects their summaries, so the agent reasons with
+   * relevant experience at hand like a human recalling it — without being
+   * asked. Queries are built with priority: the user's direct words first,
+   * then concrete entities from the latest reasoning block (session ids,
+   * commit hashes, error codes, file paths — grounded facts of the current
+   * thinking, never its speculative wording), then the recent execution
+   * context (tool results and assistant replies) as fill-in. Ids already
+   * recalled in this session are not repeated. `0` disables recall.
    */
   recallTopN?: number
+  /**
+   * Keyword pre-filter cap for automatic recall. The cheap keyword pass keeps
+   * the top-`recallCandidates` matches; when that is no larger than
+   * `recallTopN` the list is injected directly (zero LLM cost), and only when
+   * the keyword pass returns more candidates than fit does one auxiliary LLM
+   * call re-rank the candidates semantically — a failing or slow re-rank
+   * falls back to the keyword order, so recall never blocks on the model.
+   */
+  recallCandidates?: number
+  /** Re-rank timeout in milliseconds (only paid when the LLM re-rank runs). */
+  recallRerankTimeoutMs?: number
+  /** Optional explicit provider route for the re-rank call; must be paired with `model`. */
+  provider?: string
+  /** Optional explicit model id for the re-rank call; must be paired with `provider`. */
+  model?: string
 }
 
 export const Config: Schema<Config> = z.object({
   maxBytes: z.number().default(16 * 1024),
   recallTopN: z.number().step(1).min(0).default(3),
+  recallCandidates: z.number().step(1).min(1).default(10),
+  recallRerankTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(15_000),
+  provider: z.string(),
+  model: z.string(),
 })
 
 /** One catalogue entry (title + id); contents are fetched on demand via the memory tool. */
@@ -160,7 +182,9 @@ const QUERY_NOISE_WORDS = new Set(['error', 'syntaxerror', 'failed', 'failure', 
  * Retrieval queries for automatic recall: up to two latin words (≥3 chars,
  * noise words filtered) plus the longest CJK segment of the input (capped at
  * 20 chars). No word segmentation exists for CJK, so the longest segment is
- * the cheapest useful probe.
+ * the cheapest useful probe. Only CJK-bearing segments compete for the CJK
+ * slot — an English path or code fragment (`packages/.../tsconfig.json`)
+ * carries no retrieval value and would otherwise steal the budget.
  */
 function recallQueries(text: string): string[] {
   const queries: string[] = []
@@ -170,12 +194,153 @@ function recallQueries(text: string): string[] {
     queries.push(word)
     if (queries.length >= 2) break
   }
-  const segments = text.split(/[，。！？、；：\s]+/).filter(segment => segment.length > 0)
+  const segments = text.split(/[，。！？、；：\s]+/)
+    .filter(segment => segment.length > 0 && /[\u3400-\u9fff]/.test(segment))
   if (segments.length > 0) {
     const longest = segments.reduce((a, b) => (b.length > a.length ? b : a))
     if (longest.length >= 2) queries.push(longest.slice(0, 20))
   }
   return [...new Set(queries)].slice(0, 3)
+}
+
+/**
+ * Concrete entity tokens worth retrieving on, extracted from reasoning text:
+ * session ids, commit hashes, error codes, and file paths. Reasoning is a
+ * draft, but its entities are grounded facts of the current context — a
+ * session id the agent is looking at, an error code it just hit, a file it is
+ * about to open — so they are safe retrieval probes, unlike reasoning's
+ * speculative wording ("可能/也许"), which stays out of queries. Each entity
+ * is a literal search term; no semantic guessing is performed.
+ */
+function reasoningEntities(text: string): string[] {
+  if (text === '') return []
+  const entities: string[] = []
+  const push = (token: string): void => {
+    const value = token.toLowerCase()
+    if (value.length < 4 || value.length > 80) return
+    if (entities.includes(value) || QUERY_NOISE_WORDS.has(value)) return
+    entities.push(value)
+  }
+  // Full session ids (`session-<uuid>`); short prefixes fall through to hashes.
+  for (const match of text.matchAll(/session-[0-9a-f-]{20,}/gi)) push(match[0])
+  // Commit hashes and long hex ids; a pure-letters hex word is likely a
+  // regular English token (`defined`), so require at least one digit.
+  for (const match of text.matchAll(/\b[0-9a-f]{7,40}\b/gi)) {
+    if (/\d/.test(match[0])) push(match[0])
+  }
+  // Error codes and shout-case constants (ENOENT, MODULE_NOT_FOUND, TS7006).
+  for (const match of text.matchAll(/\b[A-Z][A-Z0-9_]{3,}\b/g)) push(match[0])
+  // File paths with known source/config extensions, Windows or POSIX.
+  for (const match of text.matchAll(/[\w./\\-]+\.(?:ts|tsx|js|jsx|json|md|yaml|yml|zstd)\b/gi)) push(match[0])
+  return entities.slice(0, 2)
+}
+
+/**
+ * Merge recall queries with priority: the user's direct words first (the
+ * primary intent probe — they must reach retrieval even when the execution
+ * context is noisy), then concrete entities from the latest reasoning block
+ * (the grounded facts of what the agent is thinking about right now), then
+ * context keywords (a failing tool result's keyword still rides the query
+ * when the prompt is generic, e.g. "继续").
+ */
+function mergeRecallQueries(userText: string, reasoningText: string, contextText: string): string[] {
+  return [...new Set([
+    ...recallQueries(userText),
+    ...reasoningEntities(reasoningText),
+    ...recallQueries(contextText),
+  ])].slice(0, 3)
+}
+
+/** The re-rank judge's stable system instruction. */
+const RERANK_SYSTEM = [
+  '你是记忆相关性排序器。当前任务上下文 + 关键词粗筛出的候选记忆摘要（id｜标题｜摘要），',
+  '判断哪些候选与当前任务最相关（修过的 bug、做过的决策、踩过的坑、学到的路径），',
+  '输出最相关的 top-N 个 id，按相关性从高到低，每行一个 id。',
+  '只输出 id 列表，不要输出其他任何文字。',
+  '如果候选都不相关，输出空列表。',
+].join('\n')
+
+/** Translate terminal finish reasons into an auxiliary-call failure. */
+function finishError(finish: FinishReason): Error | undefined {
+  switch (finish.kind) {
+    case 'stop':
+      return undefined
+    case 'error':
+    case 'aborted':
+      return new Error(finish.failure.message)
+    case 'max-tokens':
+      return new Error('memory-context: re-rank output reached the token cap')
+    case 'tool-calls':
+      return new Error('memory-context: re-rank unexpectedly requested a tool')
+    default:
+      return new Error(`memory-context: unsupported finish reason "${String((finish as { kind?: unknown }).kind)}"`)
+  }
+}
+
+/** The session's route: explicit config pair, else the latest request header. */
+function resolveRoute(
+  session: Session,
+  config: Config,
+): { provider: string; model: string } | undefined {
+  if (config.provider !== undefined && config.model !== undefined) {
+    return { provider: config.provider, model: config.model }
+  }
+  for (const event of session.events) {
+    if (event.type !== 'request/header') continue
+    return { provider: event.data.header.config.provider, model: event.data.header.config.model }
+  }
+  return undefined
+}
+
+/** One auxiliary LLM text call for candidate re-ranking. */
+async function rerankCandidates(
+  ctx: Context,
+  route: { provider: string; model: string },
+  session: Session,
+  candidates: ReadonlyArray<{ id: string; title: string; snippet: string }>,
+  topN: number,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<string[]> {
+  const input = [
+    '任务上下文（最近对话/工具结果）：',
+    '（本次联想查询词已用于关键词粗筛，这里只做语义精排）',
+    '',
+    '候选记忆：',
+    ...candidates.map((candidate, index) => `${index + 1}. ${candidate.id}｜${candidate.title}｜${candidate.snippet}`),
+    '',
+    `请输出最相关的 ${topN} 个 id，每行一个，按相关性从高到低。`,
+  ].join('\n')
+  const messages: Message[] = [createUserMessage({
+    content: [{ type: 'text', text: input }],
+    source: { kind: 'plugin', plugin: 'dsh-memory-context' },
+  })]
+  using callDeadline = deadline(signal, timeoutMs, 'MEMORY_CONTEXT_RERANK_TIMEOUT')
+  const options: GenerateOptions = deepFreeze({
+    provider: route.provider,
+    model: route.model,
+    messages,
+    system: RERANK_SYSTEM,
+    maxTokens: 128,
+    sessionId: session.id,
+    signal: callDeadline.signal,
+  })
+  const assembler = new BlockAssembler()
+  for await (const chunk of ctx.llm.stream(options)) {
+    callDeadline.signal.throwIfAborted()
+    assembler.push(chunk)
+  }
+  callDeadline.signal.throwIfAborted()
+  const terminalError = finishError(assembler.finish)
+  if (terminalError !== undefined) throw terminalError
+  const text = assembler.blocks()
+    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+    .map(block => block.text)
+    .join(' ')
+  const ids = text.split('\n')
+    .map(line => line.trim().replace(/^[-*•\d.\s]+/, ''))
+    .filter(line => line.length > 0)
+  return ids
 }
 
 /** The text of the latest user-role message in the request. */
@@ -195,6 +360,9 @@ function lastUserText(messages: readonly UserMessage[]): string {
  * Recursively collect text from message content blocks. Tool results nest
  * their payload under a `tool-result` block whose own `content` is a block
  * array, so a naive top-level text scan would miss tool output entirely.
+ * Reasoning blocks are NOT collected here: reasoning is a draft, and its
+ * speculative wording must not enter keyword queries — only its concrete
+ * entities do, via {@link reasoningEntities}.
  */
 function contentText(content: readonly { type: string; text?: unknown; content?: unknown }[]): string {
   const parts: string[] = []
@@ -202,6 +370,22 @@ function contentText(content: readonly { type: string; text?: unknown; content?:
     if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
     if (block.type === 'tool-result' && Array.isArray(block.content)) {
       parts.push(contentText(block.content as { type: string; text?: unknown; content?: unknown }[]))
+    }
+  }
+  return parts.join(' ')
+}
+
+/** Reasoning-block text of the session's most recent surface messages. */
+function recentReasoningText(session: Session, maxMessages: number): string {
+  const tail = session.deriveMessages().slice(-maxMessages).reverse()
+  const parts: string[] = []
+  for (const message of tail) {
+    const kind = (message as { source?: { kind?: unknown } }).source?.kind
+    if (typeof kind === 'string' && kind.startsWith('rin-')) continue
+    for (const block of message.content) {
+      if (block.type === 'reasoning' && typeof block.text === 'string' && block.text.trim() !== '') {
+        parts.push(block.text)
+      }
     }
   }
   return parts.join(' ')
@@ -257,6 +441,8 @@ function alreadyOnSurface(agent: Agent, payload: UserMessage): boolean {
 export function apply(ctx: Context, config: Config = {}): void {
   const maxBytes = config.maxBytes ?? 16 * 1024
   const recallTopN = config.recallTopN ?? 3
+  const recallCandidates = config.recallCandidates ?? 10
+  const recallRerankTimeoutMs = config.recallRerankTimeoutMs ?? 15_000
 
   const lifecycle = new AbortController()
   ctx.effect(() => () => {
@@ -282,10 +468,18 @@ export function apply(ctx: Context, config: Config = {}): void {
     signal.throwIfAborted()
     const cwd = agent.session.header.cwd
     if (cwd === undefined) return undefined
-    // Execution context first (recent tool results and assistant replies, so
-    // a failing command's error text drives retrieval), the user's latest
-    // words second (the direct prompt remains the primary intent probe).
-    const queries = recallQueries(`${recentSurfaceText(agent.session, 3)} ${lastUserText(messages)}`)
+    // The user's direct words are the primary intent probe and are reserved
+    // first; concrete entities from the latest reasoning block come second
+    // (the grounded facts of what the agent is thinking about — a session id,
+    // an error code, a file path — without its speculative wording); the
+    // recent execution context (tool results, assistant replies) fills the
+    // remaining budget, so a failing command's error text still drives
+    // retrieval when the prompt is generic.
+    const queries = mergeRecallQueries(
+      lastUserText(messages),
+      recentReasoningText(agent.session, 3),
+      recentSurfaceText(agent.session, 3),
+    )
     if (queries.length === 0) return undefined
     signal.throwIfAborted()
     const seen = recalledIds.get(agent.session) ?? new Set<string>()
@@ -308,15 +502,55 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     const ranked = [...byId.entries()]
       .sort((left, right) => right[1].count - left[1].count)
-      .slice(0, recallTopN)
+      .slice(0, recallCandidates)
     if (ranked.length === 0) return undefined
-    for (const [id] of ranked) seen.add(id)
+    // Two-stage recall: when the keyword pre-filter returns more candidates
+    // than fit the budget, one auxiliary LLM call re-ranks them semantically;
+    // otherwise the keyword order is injected directly (zero LLM cost). A
+    // failing or slow re-rank falls back to the keyword order — recall never
+    // blocks on the model, it only uses it when the cheap pass over-produces.
+    let selected = ranked
+    if (ranked.length > recallTopN) {
+      const route = resolveRoute(agent.session, config)
+      if (route !== undefined) {
+        try {
+          const preferred = await rerankCandidates(
+            ctx,
+            route,
+            agent.session,
+            ranked.map(([id, hit]) => ({ id, title: hit.title, snippet: hit.snippet.slice(0, 120) })),
+            recallTopN,
+            recallRerankTimeoutMs,
+            signal,
+          )
+          const byPreferredId = new Map(ranked.map(([id, hit]) => [id, hit]))
+          const reranked: Array<[string, { title: string; snippet: string; count: number }]> = []
+          for (const id of preferred) {
+            const hit = byPreferredId.get(id)
+            if (hit !== undefined) reranked.push([id, hit])
+          }
+          // Re-ranked ids first (best first), then any keyword-ranked
+          // candidates that the judge did not name, still within the budget.
+          for (const [id, hit] of ranked) {
+            if (reranked.length >= recallTopN) break
+            if (!reranked.some(entry => entry[0] === id)) reranked.push([id, hit])
+          }
+          if (reranked.length > 0) selected = reranked
+        } catch (error) {
+          // re-rank failure degrades to the keyword order, never blocks recall
+          ctx.logger.warn('memory-context: re-rank failed, keeping keyword order: %o', error)
+        }
+      }
+    }
+    const final = selected.slice(0, recallTopN)
+    if (final.length === 0) return undefined
+    for (const [id] of final) seen.add(id)
     recalledIds.set(agent.session, seen)
     const lines = [
       `## 相关记忆（自动联想，第 ${turn} 轮）`,
       '',
       '与当前任务相关的既有经验摘要（按相关性排序）：',
-      ...ranked.map(([id, hit]) => `- ${id}：${hit.snippet.slice(0, 120)}`),
+      ...final.map(([id, hit]) => `- ${id}：${hit.snippet.slice(0, 120)}`),
       '',
       '需要详情用 memory read 展开；与任务无关可忽略。',
     ]
@@ -326,7 +560,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         kind: 'rin-memory-recall',
         turn,
         queries,
-        nodes: ranked.map(([id]) => id),
+        nodes: final.map(([id]) => id),
       },
     })
   }
