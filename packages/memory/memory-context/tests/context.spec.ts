@@ -520,6 +520,42 @@ describe('the memory context injection', () => {
     expect(second.kind === 'enter' && second.messages.some(m => m.source.kind === 'rin-memory-recall')).toBe(false)
   })
 
+  it('recalls on every step of a multi-step turn, deduplicated per memory', async () => {
+    const root = tempRoot('recall-steps')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'bugfix/alpha', title: 'Alpha', content: 'alpha 相关' })
+    await memories.remember('workspace', workspace, { id: 'bugfix/beta', title: 'Beta', content: 'beta 相关' })
+    const agent = stubAgent(workspace)
+
+    // Step 1: recall `alpha` from the user prompt.
+    const msgA = createUserMessage({
+      content: [{ type: 'text', text: 'alpha 问题' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const first = await stepDecision(ctx, agent, [msgA], 1, 2)
+    const firstRecalls = first.kind === 'enter' ? first.messages.filter(m => m.source.kind === 'rin-memory-recall') : []
+    expect(firstRecalls).toHaveLength(1)
+    expect(blocksText(firstRecalls[0]?.content)).toContain('bugfix/alpha')
+    // The loop persists the injection to the surface before the next step.
+    for (const message of firstRecalls) {
+      agent.session.append('user/message', message, { surfaceOp: 'append' })
+    }
+
+    // Step 2 of the same turn re-runs recall against the new context: `beta`
+    // is recalled fresh, `alpha` is not repeated (session-level dedup).
+    const msgB = createUserMessage({
+      content: [{ type: 'text', text: 'beta 问题' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const second = await stepDecision(ctx, agent, [msgB], 2, 2)
+    const secondRecalls = second.kind === 'enter' ? second.messages.filter(m => m.source.kind === 'rin-memory-recall') : []
+    expect(secondRecalls).toHaveLength(1)
+    const text = blocksText(secondRecalls[0]?.content)
+    expect(text).toContain('bugfix/beta')
+    expect(text).not.toContain('bugfix/alpha')
+  })
+
   it('does not recall on turn 1, where the catalogue already covers memory', async () => {
     const root = tempRoot('recall-turn1')
     const workspace = join(root, 'ws')
