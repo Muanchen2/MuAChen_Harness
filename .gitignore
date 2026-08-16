@@ -40,3 +40,11 @@ worktrees/
 .typert-*/
 .dsh-memory/
 dsh-web.log
+
+# Desktop shell artifacts
+/start.exe
+/port.txt
+/Microsoft.Web.WebView2.Core.dll
+/Microsoft.Web.WebView2.WinForms.dll
+/WebView2Loader.dll
+/start.exe.WebView2/
