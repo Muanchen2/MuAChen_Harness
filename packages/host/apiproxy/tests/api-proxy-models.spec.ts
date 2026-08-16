@@ -255,6 +255,7 @@ describe('Web session model selection', () => {
     } as never)
     const api = createApiProxy(ctx, {
       defaultModelSelection: () => ({ provider: 'text-only', model: 'plain' }),
+      cwd: '/tmp',
     })
     expect((await api.sessions.selectModel(request({
       sessionId, provider: 'text-only', model: 'plain',
