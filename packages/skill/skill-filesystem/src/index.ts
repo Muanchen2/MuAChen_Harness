@@ -38,6 +38,12 @@ const PROJECT_AGENTS_RANK = 200
 const CUSTOM_RANK = 300
 const USER_DSH_RANK = 400
 const USER_AGENTS_RANK = 500
+const RIN_PROJECT_DSH_RANK = 100
+const RIN_PROJECT_AGENTS_RANK = 200
+const RIN_CUSTOM_RANK = 300
+const RIN_USER_RANK = 400
+const RIN_BUNDLED_RANK = 500
+const RIN_ROOT_NAME = '.dsh-skills'
 const DEFAULT_WATCH_STABILITY_THRESHOLD_MS = 200
 const DEFAULT_WATCH_POLL_INTERVAL_MS = 100
 const DEFAULT_WATCH_MAX_PROJECTS = 128
@@ -49,13 +55,15 @@ export const inject = ['skills']
 export interface Config {
   /** Unique provider name. Defaults to `local`. */
   providerName?: string
+  /** Select the standard two-level roots or Rin's directory-chain roots. */
+  rootMode?: 'standard' | 'rin'
   /** Whether project and user roots are included around custom roots. */
   includeDefaultRoots?: boolean
   /** DeepSeek Harness config root. Defaults to `$DSH_HOME` or `~/.dsh`. */
   dshHome?: string
   /** Shared agent config root. Defaults to `$DSH_AGENTS_HOME` or `~/.agents`. */
   agentsHome?: string
-  /** Additional skill roots scanned after project roots and before user roots. */
+  /** Additional skill roots scanned after workspace roots and before the user root. */
   customSkillDirs?: string[]
   /** Whether host-local skill roots are watched for catalog changes. */
   watch?: boolean
@@ -75,6 +83,7 @@ export interface Config {
 
 export const Config: Schema<Config> = z.object({
   providerName: z.string().min(1).default('filesystem'),
+  rootMode: z.union(['standard', 'rin'] as const).default('standard'),
   includeDefaultRoots: z.boolean().default(true),
   dshHome: z.string(),
   agentsHome: z.string(),
@@ -145,6 +154,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 /** Provider that maps local project/user skill roots into `ctx.skills`. */
 export class FileSystemSkillProvider implements SkillProvider {
   readonly name: string
+  private readonly rootMode: 'standard' | 'rin'
   private readonly includeDefaultRoots: boolean
   private readonly dshHome: string
   private readonly agentsHome: string
@@ -159,6 +169,7 @@ export class FileSystemSkillProvider implements SkillProvider {
     config: Config = {},
   ) {
     this.name = config.providerName ?? 'filesystem'
+    this.rootMode = config.rootMode ?? 'standard'
     this.includeDefaultRoots = config.includeDefaultRoots ?? true
     this.dshHome = resolveDshHome(config.dshHome)
     this.agentsHome = resolve(config.agentsHome ?? process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'))
@@ -239,6 +250,8 @@ export class FileSystemSkillProvider implements SkillProvider {
   }
 
   private async roots(cwd: string | undefined): Promise<SkillRoot[]> {
+    if (this.rootMode === 'rin') return await this.rinRoots(cwd)
+
     const roots: SkillRoot[] = []
     if (this.includeDefaultRoots && cwd !== undefined) {
       const projectRoot = await findProjectRoot(resolve(cwd), optionalFileSystem(this.ctx))
@@ -256,6 +269,52 @@ export class FileSystemSkillProvider implements SkillProvider {
     }
     if (this.bundledSkillDir !== undefined) {
       roots.push({ path: this.bundledSkillDir, source: 'bundled', rank: BUNDLED_SKILL_RANK, trustedHost: true })
+    }
+    return roots
+  }
+
+  /** Discover the Rin hierarchy: nearest `.dsh-skills` roots win over ancestors. */
+  private async rinRoots(cwd: string | undefined): Promise<SkillRoot[]> {
+    const roots: SkillRoot[] = []
+    if (this.includeDefaultRoots && cwd !== undefined) {
+      const workspace = resolve(cwd)
+      const directories = ancestorDirectories(workspace)
+      for (const [index, directory] of directories.entries()) {
+        roots.push({
+          path: join(directory, RIN_ROOT_NAME),
+          source: 'rin-workspace',
+          rank: -directories.length + index,
+          projectRoot: workspace,
+        })
+      }
+    }
+    roots.push(...this.customSkillDirs.map((path, index) => ({
+      path,
+      source: `custom-${index}`,
+      rank: RIN_CUSTOM_RANK + index,
+    })))
+    if (this.includeDefaultRoots) {
+      if (cwd !== undefined) {
+        const projectRoot = await findProjectRoot(resolve(cwd), optionalFileSystem(this.ctx))
+        roots.push(
+          { path: join(projectRoot, '.dsh/skills'), source: 'project-dsh', rank: RIN_PROJECT_DSH_RANK, projectRoot },
+          { path: join(projectRoot, '.agents/skills'), source: 'project-agents', rank: RIN_PROJECT_AGENTS_RANK, projectRoot },
+        )
+      }
+      roots.push({
+        path: join(this.dshHome, 'skills'),
+        source: 'rin-user',
+        rank: RIN_USER_RANK,
+        skipSystem: true,
+      })
+    }
+    if (this.bundledSkillDir !== undefined) {
+      roots.push({
+        path: this.bundledSkillDir,
+        source: 'bundled',
+        rank: this.rootMode === 'rin' ? RIN_BUNDLED_RANK : BUNDLED_SKILL_RANK,
+        trustedHost: true,
+      })
     }
     return roots
   }
@@ -284,6 +343,7 @@ interface WatchHandle {
 class SkillWatchManager {
   private readonly roots = new Map<string, RootWatchState>()
   private readonly projects = new Map<string, Set<string>>()
+  private readonly sharedPaths = new Set<string>()
   private readonly lifecycle = new AbortController()
   private closing = false
   private invalidationQueued = false
@@ -298,8 +358,10 @@ class SkillWatchManager {
     if (this.closing) return
     const projectRoots = new Map<string, SkillRoot[]>()
     const pending: Promise<void>[] = []
+    let topologyChanged = false
     for (const root of roots) {
       if (root.projectRoot === undefined) {
+        this.sharedPaths.add(root.path)
         pending.push(this.retainRoot(root, `shared:${root.path}`))
         continue
       }
@@ -307,11 +369,34 @@ class SkillWatchManager {
       grouped.push(root)
       projectRoots.set(root.projectRoot, grouped)
     }
+    for (const path of this.sharedPaths) {
+      if (roots.some(root => root.projectRoot === undefined && root.path === path)) continue
+      this.sharedPaths.delete(path)
+      topologyChanged = true
+      pending.push(this.releaseRoot(path, `shared:${path}`))
+    }
+    const activeProjects = new Set(projectRoots.keys())
+    for (const [projectRoot, paths] of this.projects) {
+      if (activeProjects.has(projectRoot)) continue
+      this.projects.delete(projectRoot)
+      topologyChanged = true
+      const owner = `project:${projectRoot}`
+      for (const path of paths) pending.push(this.releaseRoot(path, owner))
+    }
     for (const [projectRoot, grouped] of projectRoots) {
       const owner = `project:${projectRoot}`
-      this.projects.delete(projectRoot)
+      const previous = this.projects.get(projectRoot)
       const paths = new Set(grouped.map(root => root.path))
+      this.projects.delete(projectRoot)
       this.projects.set(projectRoot, paths)
+      if (previous !== undefined) {
+        for (const path of previous) {
+          if (!paths.has(path)) {
+            topologyChanged = true
+            pending.push(this.releaseRoot(path, owner))
+          }
+        }
+      }
       for (const root of grouped) pending.push(this.retainRoot(root, owner))
     }
     let evictedProject = false
@@ -321,12 +406,13 @@ class SkillWatchManager {
       if (oldest.done) break
       const [projectRoot, paths] = oldest.value
       this.projects.delete(projectRoot)
+      topologyChanged = true
       const owner = `project:${projectRoot}`
       for (const path of paths) pending.push(this.releaseRoot(path, owner))
       evictedProject = true
     }
     await Promise.all(pending)
-    if (evictedProject) this.invalidate()
+    if (topologyChanged || evictedProject) this.invalidate()
   }
 
   observeHostMutation(path: string): void {
@@ -342,6 +428,7 @@ class SkillWatchManager {
     const states = [...this.roots.values()]
     this.roots.clear()
     this.projects.clear()
+    this.sharedPaths.clear()
     await Promise.all(states.map(async (state) => {
       await settleWatcherOpening(state.opening)
       const watcher = state.watcher
@@ -931,6 +1018,17 @@ function findClosingFrontmatter(raw: string, start: number): { start: number; bo
     }
     if (nextNewline < 0) return undefined
     lineStart = nextNewline + 1
+  }
+}
+
+function ancestorDirectories(cwd: string): string[] {
+  const directories: string[] = []
+  let current = cwd
+  while (true) {
+    directories.push(current)
+    const parent = dirname(current)
+    if (parent === current) return directories
+    current = parent
   }
 }
 

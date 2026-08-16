@@ -205,6 +205,41 @@ describe('FileSystemSkillProvider', () => {
     expect((await ctx.skills.list({ cwd: noGit })).map(skill => skill.name)).toContain('fallback-root')
   })
 
+  it('discovers only the Rin ancestor chain and keeps the nearest root first', async () => {
+    const home = await tempDir('skill-rin-home')
+    const workspace = await tempDir('skill-rin-workspace')
+    const nested = join(workspace, 'packages/app')
+    await mkdir(join(workspace, '.git'), { recursive: true })
+    await mkdir(nested, { recursive: true })
+
+    await writeSkill(join(workspace, '.dsh-skills'), 'shared', 'Workspace skill')
+    await writeSkill(join(workspace, '.dsh-skills'), 'workspace-only', 'Workspace-only skill')
+    await writeSkill(join(workspace, 'packages/.dsh-skills'), 'shared', 'Package skill')
+    await writeSkill(join(nested, '.dsh-skills'), 'shared', 'Nested skill')
+    await writeSkill(join(workspace, '.dsh/skills'), 'standard-only', 'Standard project skill')
+    await writeSkill(join(workspace, '.agents/skills'), 'agents-only', 'Agents project skill')
+    await writeSkill(join(home, '.agents/skills'), 'global-only', 'Global agents skill')
+    await writeSkill(join(home, '.dsh/skills'), 'shared', 'User skill')
+    await writeSkill(join(home, '.dsh/skills'), 'user-only', 'User-only skill')
+
+    const ctx = await setupLocal(home, { rootMode: 'rin' })
+    const listed = await ctx.skills.list({ cwd: nested })
+
+    expect(listed.map(skill => skill.name)).toEqual([
+      'agents-only',
+      'shared',
+      'standard-only',
+      'user-only',
+      'workspace-only',
+    ])
+    expect(listed.find(skill => skill.name === 'shared')).toMatchObject({
+      description: 'Nested skill',
+      source: 'rin-workspace',
+    })
+    expect(listed.find(skill => skill.name === 'user-only')?.source).toBe('rin-user')
+    expect(listed.find(skill => skill.name === 'global-only')).toBeUndefined()
+  })
+
   it('lets project skills override runtime while runtime overrides custom and user skills', async () => {
     const home = await tempDir('skill-runtime-priority')
     const project = await tempDir('skill-runtime-project')
