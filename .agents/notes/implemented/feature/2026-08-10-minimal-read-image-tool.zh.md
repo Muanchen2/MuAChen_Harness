@@ -2,6 +2,8 @@
 
 Status: implemented
 
+本 note 已知限制中的"文本路由拒绝而非降级"缺口,现已由 [纯文本模型的图片消息降级为文件引用](2026-08-16-image-degrade-text-only.md) 在 api-proxy 层补上;`read_image` 的路由门禁本身不变。
+
 [English](2026-08-10-minimal-read-image-tool.md) | 中文
 
 ## 问题

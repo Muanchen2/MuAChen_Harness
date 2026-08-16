@@ -6,6 +6,8 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
+import { readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -231,6 +233,83 @@ describe('Web session model selection', () => {
     expect(expectValue(await api.sessions.selectModel(request({
       sessionId, provider: 'text-only', model: 'plain',
     }))).selected).toEqual({ provider: 'text-only', model: 'plain' })
+    await ctx.fiber.dispose()
+  })
+
+  it('degrades image prompts to file references for a text-only model', async () => {
+    const { ctx, agent, sessionId } = await harness()
+    registerTextOnly(ctx)
+    const followup = vi.fn()
+    Object.assign(agent, { followup })
+    const imageLimits = {
+      maxImageBytes: 1024 * 1024,
+      maxImagesPerMessage: 2,
+      maxMessageImageBytes: 4 * 1024 * 1024,
+      maxImagePixels: 4 * 1024 * 1024,
+      mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+    }
+    ctx.provide('attachments', {
+      imageLimits,
+      validateImage: vi.fn(),
+      saveImage: vi.fn(),
+    } as never)
+    const api = createApiProxy(ctx, {
+      defaultModelSelection: () => ({ provider: 'text-only', model: 'plain' }),
+    })
+    expect((await api.sessions.selectModel(request({
+      sessionId, provider: 'text-only', model: 'plain',
+    }))).result.ok).toBe(true)
+
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+      'base64',
+    )
+    const result = await api.sessions.prompt(request({
+      sessionId,
+      mode: 'queue' as const,
+      content: [
+        { type: 'image' as const, mediaType: 'image/png' as const, data: png.toString('base64') },
+        { type: 'text' as const, text: '看下这张图' },
+      ],
+    }))
+    expect(result.result.ok).toBe(true)
+    const message = followup.mock.calls[0]?.[0] as UserMessage
+    expect(message.content).toHaveLength(2)
+    expect(message.content[0]).toMatchObject({ type: 'text' })
+    const text = (message.content[0] as { text: string }).text
+    const match = /用户发送了一张图片: ([^\s(]+)/.exec(text)
+    expect(match).not.toBeNull()
+    // no session cwd in this harness: the file lands under the OS temp dir
+    const written = await readFile(match![1]!)
+    expect(match![1]!.startsWith(tmpdir())).toBe(true)
+    expect([...written]).toEqual([...png])
+
+    // limits still apply on the degradation path
+    const denied = await api.sessions.prompt(request({
+      sessionId,
+      mode: 'queue' as const,
+      content: [
+        { type: 'image' as const, mediaType: 'image/png' as const, data: png.toString('base64') },
+        { type: 'image' as const, mediaType: 'image/png' as const, data: png.toString('base64') },
+        { type: 'image' as const, mediaType: 'image/png' as const, data: png.toString('base64') },
+      ],
+    }))
+    expect(denied.result).toMatchObject({
+      ok: false,
+      error: { code: 'attachment-error', details: { reason: 'TOO_MANY_IMAGES' } },
+    })
+
+    imageLimits.maxMessageImageBytes = 1 // 1-byte image exceeds the shrunk limit
+    const tooLarge = await api.sessions.prompt(request({
+      sessionId,
+      mode: 'queue' as const,
+      content: [{ type: 'image' as const, mediaType: 'image/png' as const, data: png.toString('base64') }],
+    }))
+    expect(tooLarge.result).toMatchObject({
+      ok: false,
+      error: { code: 'attachment-error', details: { reason: 'IMAGES_TOO_LARGE' } },
+    })
+
     await ctx.fiber.dispose()
   })
 

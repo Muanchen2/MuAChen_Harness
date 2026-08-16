@@ -2,6 +2,8 @@
 
 Status: implemented
 
+仅就 prompt 准入的拒绝分支,被 [纯文本模型的图片消息降级为文件引用](../feature/2026-08-16-image-degrade-text-only.md) 部分取代;本 note 记录的模态解析链不变。
+
 [English](2026-08-12-pi-ai-route-default-input-modalities.md) | 中文
 
 ## 问题

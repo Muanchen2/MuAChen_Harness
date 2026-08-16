@@ -2,6 +2,8 @@
 
 Status: implemented
 
+The delegated-viewing gap in this note's Known Limitations ("a text-only route refuses instead of degrading") is now covered at the api-proxy layer by [image prompts degrade to file references for text-only models](2026-08-16-image-degrade-text-only.md); the `read_image` route gate itself is unchanged.
+
 English | [中文](2026-08-10-minimal-read-image-tool.zh.md)
 
 ## Problem

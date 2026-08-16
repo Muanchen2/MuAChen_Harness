@@ -4,8 +4,9 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, stat } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { mkdir, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
@@ -183,6 +184,57 @@ async function durablePromptContent(ctx: Context, content: readonly PromptConten
       ...item.part.name === undefined ? {} : { name: item.part.name },
     })
     blocks.push({ type: 'image', attachment })
+  }
+  return blocks
+}
+
+/** File extension for one accepted raster media type. */
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+}
+
+/**
+ * Persist image parts as local files and replace them with text references.
+ * Text-only models cannot receive image content, so instead of refusing the
+ * message this hands the model an absolute path it can read through the
+ * `vision-describe` skill. Files land under `<cwd>/.dsh-uploads/` (or the OS
+ * temp dir when no workspace cwd exists); the replacement text carries the
+ * path, byte count, and media type.
+ */
+async function degradeImagesForTextModel(
+  ctx: Context,
+  content: readonly PromptContentPart[],
+  cwd: string | undefined,
+): Promise<ContentBlock[]> {
+  const limits = ctx.attachments.imageLimits
+  const images = content.filter((part): part is Extract<PromptContentPart, { type: 'image' }> => part.type === 'image')
+  if (images.length > limits.maxImagesPerMessage) {
+    throw new AttachmentError('Prompt exceeds the configured image-count limit.', 'TOO_MANY_IMAGES')
+  }
+  const totalBytes = images.reduce((sum, image) => sum + decodeBase64(image.data).byteLength, 0)
+  if (totalBytes > limits.maxMessageImageBytes) {
+    throw new AttachmentError('Prompt exceeds the configured aggregate image-byte limit.', 'IMAGES_TOO_LARGE')
+  }
+  const dir = join(cwd ?? tmpdir(), '.dsh-uploads')
+  await mkdir(dir, { recursive: true })
+  const blocks: ContentBlock[] = []
+  let index = 0
+  for (const part of content) {
+    if (part.type === 'text') {
+      blocks.push({ type: 'text', text: part.text })
+      continue
+    }
+    const data = decodeBase64(part.data)
+    const ext = IMAGE_EXTENSIONS[part.mediaType] ?? 'img'
+    const file = join(dir, `img-${Date.now()}-${index++}.${ext}`)
+    await writeFile(file, data)
+    blocks.push({
+      type: 'text',
+      text: `用户发送了一张图片: ${file}(${data.byteLength} 字节, ${part.mediaType})。请使用 vision-describe skill 查看并描述这张图片。`,
+    })
   }
   return blocks
 }
@@ -2482,18 +2534,19 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const hasImage = content.some(part => part.type === 'image')
         const admit = async (): Promise<RpcResponse<{ accepted: true }>> => {
           try {
+            let durable: ContentBlock[]
             if (hasImage) {
               const current = selectionFor(agent).current
               const modelInfo = await ctx.llm.resolveModelInfo(current.provider, current.model)
-              if (modelInfo.inputModalities !== undefined && !modelInfo.inputModalities.includes('image')) {
-                return err(request, {
-                  code: 'attachment-error',
-                  message: `Model "${current.model}" does not support image input.`,
-                  details: { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
-                })
-              }
+              const textOnly = modelInfo.inputModalities !== undefined && !modelInfo.inputModalities.includes('image')
+              // A text-only model cannot receive image content; degrade the
+              // images to local file references instead of refusing the prompt.
+              durable = textOnly
+                ? await degradeImagesForTextModel(ctx, content, agent.session.header.cwd)
+                : await durablePromptContent(ctx, content)
+            } else {
+              durable = await durablePromptContent(ctx, content)
             }
-            const durable = await durablePromptContent(ctx, content)
             const message: UserMessage = createUserMessage({ content: durable, source })
             if (mode === 'steer') agent.steer(message)
             else agent.followup(message)

@@ -33,6 +33,7 @@
 | `@deepseek-ai/dsh-tool-lsp` | `lsp` | `ctx.tools`、`ctx.lsp`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，因此其模型可见 schema 在更换提供方时保持稳定。运行时要求已注册提供方，例如 `@deepseek-ai/dsh-lsp-stdio`；如果没有提供方，查询会返回结构化 `LSP_UNAVAILABLE` 错误，而不会改变 schema。 |
 | `@deepseek-ai/dsh-tool-ralph` | `ralph` | `ctx.tools`、`ctx.workflowEngine`、`ctx.subagents`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents every fresh round)` | `tool/call`、`tool/result`、`workflow and child session events during execution` | - | 固定的前台工作流会在每个 Round 启动一个全新的结构化子级；模型只能选择不可变目标和可选的 Round 上限。 |
 | `@deepseek-ai/dsh-tool-skill` | `skill` | `ctx.tools`、`ctx.agents`、`ctx.skills` | `tool/call`、`tool/result`、`user/message replacement catalogs via agent.inject()` | - | - |
+| `@deepseek-ai/dsh-skill-admin` | `skill-admin` | `ctx.tools`、`ctx.skills`、`ctx.systemPrompt`、`ctx.subprocess` | `tool/call`、`tool/result`、`git commits in the skill store` | - | skill-admin 工具渲染 git 底座的技能存储操作；schema 采集挂载本地子进程运行时，使服务构造函数无需触碰真实 store 即可解析。 |
 | `@deepseek-ai/dsh-tool-memory` | `memory` | `ctx.tools`、`ctx.memories`、`ctx.systemPrompt` | `tool/call`、`tool/result`、`git commits in the memory store` | - | memory 工具渲染 Rin 的 git 支撑存储操作；schema 采集挂载本地子进程运行时，使服务构造器无需触碰真实 store 即可解析。 |
 | `@deepseek-ai/dsh-tool-session-query` | `session_event_read`、`session_event_search`、`session_event_trace`、`session_search`、`session_trace` | `ctx.tools`、`ctx.systemPrompt`、`ctx.sessionQuery`、`a calling Agent for workspace authority` | `tool/call`、`tool/result` | - | 这 5 个只读工具会隐藏提供方游标，并根据不可变的调用 agent 会话为每个结果授权。该包需要选择启用；需要强制截止时间或限制行内输出的组合还会挂载通用超时或 spill 策略。 |
 | `@deepseek-ai/dsh-tool-subagent` | `subagent` | `ctx.tools`、`ctx.subagents`、`ctx.systemPrompt` | `tool/call`、`tool/result`、`child session events through the chosen provider` | `subagent`、`subagent_fork` | 注册的工具名称取决于加载时 `toolName` 配置（默认为 `subagent`）；上述 schema 对应默认值。随产品发布的组合会为每个 subagent 后端加载一次该包，因此模型还会看到绑定到 fork 后端的 `subagent_fork`。每个实例的描述、`run_in_background` 参数与 system prompt 策略取决于它自己的 `backgroundMode` 和 `enableRunInBackground`，因此两个随附 schema 并不相同：`subagent` 为 `continuable`，省略参数时默认后台运行，并由 runtime 自动投递结束结果；`subagent_fork` 保持 `one-shot`，省略参数时默认前台运行。详见 `packages/bundle/base/cordis.patch.yml` 和 `examples/acp-agent/cordis.yml`。 |
@@ -1237,6 +1238,83 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 ```
 
 来源：[`packages/skill/tool-skill/src/index.ts`](../packages/skill/tool-skill/src/index.ts)
+
+<a id="deepseek-aidsh-skill-admin"></a>
+
+## `@deepseek-ai/dsh-skill-admin`
+
+### `skill-admin`
+
+管理 git 底座的技能存储（写/维护面，区别于只读的 skill 工具）：create、update、archive、remove、list、history、revert、commit 和 promote 技能。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "create",
+        "update",
+        "archive",
+        "remove",
+        "list",
+        "history",
+        "revert",
+        "commit",
+        "promote"
+      ]
+    },
+    "target": {
+      "type": "string",
+      "description": "Skill layer to operate on: user (~/.dsh/skills) or workspace (nearest .dsh-skills of the session cwd)."
+    },
+    "name": {
+      "type": "string",
+      "description": "Kebab-case skill name (required by every action except list/commit)."
+    },
+    "description": {
+      "type": "string",
+      "description": "Required non-empty description for create/promote; optional field update for update."
+    },
+    "whenToUse": {
+      "type": "string",
+      "description": "Optional routing guidance for create/update/promote."
+    },
+    "script": {
+      "type": "string",
+      "description": "Optional executable entry name for create/update (script skill)."
+    },
+    "runtime": {
+      "type": "string",
+      "description": "Optional runtime for the script skill (node, python, pwsh, ...)."
+    },
+    "content": {
+      "type": "string",
+      "description": "SKILL.md body: required for create/promote, replaces the body for update."
+    },
+    "revision": {
+      "type": "string",
+      "description": "Git revision to restore for revert (take it from history)."
+    },
+    "source": {
+      "type": "string",
+      "description": "Source script path (absolute or cwd-relative) for promote."
+    },
+    "message": {
+      "type": "string",
+      "description": "Optional one-line commit message; a default is generated per action."
+    }
+  },
+  "required": [
+    "action"
+  ]
+}
+```
+
+来源：[`packages/skill/skill-admin/src/index.ts`](../packages/skill/skill-admin/src/index.ts)
+
+skill-admin 工具渲染 git 底座的技能存储操作；schema 采集挂载本地子进程运行时，使服务构造函数无需触碰真实 store 即可解析。
 
 <a id="deepseek-aidsh-tool-memory"></a>
 

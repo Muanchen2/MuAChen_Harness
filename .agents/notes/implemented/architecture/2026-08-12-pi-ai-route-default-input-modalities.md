@@ -2,6 +2,8 @@
 
 Status: implemented
 
+Partially superseded by [image prompts degrade to file references for text-only models](../feature/2026-08-16-image-degrade-text-only.md) for the prompt-admission refusal branch only; the modality resolution chain this note records is unchanged.
+
 English | [中文](2026-08-12-pi-ai-route-default-input-modalities.zh.md)
 
 ## Problem
