@@ -319,9 +319,17 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'skill',
     title: 'Skill provider registry',
     mode: 'seam',
-    implementations: ['skill-badge', 'skill-filesystem'],
+    implementations: ['skill-badge', 'skill-filesystem', 'rin-filesystem'],
     consumers: ['tool-skill'],
     note: 'Merges provider skill catalogs; tool-skill renders the session-prefix catalog and loads complete skill bodies.',
+  },
+  {
+    key: 'memories',
+    pkg: 'dsh-memory',
+    title: 'Rin memory store',
+    mode: 'core',
+    consumers: ['tool-memory', 'memory-context', 'memory-accumulate'],
+    note: 'Git-backed cross-session experience store; consumers render the catalog, recall relevant nodes, and propose accumulations.',
   },
   {
     key: 'agents',

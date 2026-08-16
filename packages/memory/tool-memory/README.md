@@ -1,5 +1,7 @@
 # @deepseek-ai/dsh-tool-memory
 
+English | [中文](README.zh.md)
+
 Model-facing `memory` tool over the Rin memory service.
 
 ## What this is

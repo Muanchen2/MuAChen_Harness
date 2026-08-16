@@ -168,13 +168,21 @@ export class GitBackend {
     return name === '' ? undefined : name
   }
 
-  /** Every branch name, sorted. */
+  /**
+   * Every branch name, sorted.
+   * @param dir - the memory store directory.
+   * @returns the branch names, sorted lexically.
+   */
   async listBranches(dir: string): Promise<string[]> {
     const result = await this.git(dir, ['branch', '--format=%(refname:short)'])
     return result.stdout.split('\n').map(line => line.trim()).filter(line => line !== '').sort()
   }
 
-  /** The current HEAD commit hash, or undefined for an unborn HEAD. */
+  /**
+   * The current HEAD commit hash, or undefined for an unborn HEAD.
+   * @param dir - the memory store directory.
+   * @returns the HEAD revision, or undefined when the store has no commits.
+   */
   async revParseHead(dir: string): Promise<string | undefined> {
     const result = await this.git(dir, ['rev-parse', 'HEAD'])
     return result.code === 0 ? result.stdout.trim() || undefined : undefined
@@ -204,13 +212,21 @@ export class GitBackend {
 
   /**
    * Store-relative paths of files with merge conflicts (empty when none).
+   * @param dir - the memory store directory.
+   * @returns the conflicted store-relative paths.
    */
   async conflictedFiles(dir: string): Promise<string[]> {
     const result = await this.git(dir, ['diff', '--name-only', '--diff-filter=U'])
     return result.stdout.split('\n').map(line => line.trim()).filter(line => line !== '')
   }
 
-  /** Store-relative paths changed between two revisions. */
+  /**
+   * Store-relative paths changed between two revisions.
+   * @param dir - the memory store directory.
+   * @param fromRev - the older revision.
+   * @param toRev - the newer revision.
+   * @returns the changed store-relative paths.
+   */
   async diffFiles(dir: string, fromRev: string, toRev: string): Promise<string[]> {
     const result = await this.git(dir, ['diff', '--name-only', `${fromRev}..${toRev}`])
     return result.stdout.split('\n').map(line => line.trim()).filter(line => line !== '')
@@ -229,7 +245,10 @@ export class GitBackend {
     return result.code === 0 ? result.stdout : undefined
   }
 
-  /** Abort an in-progress merge, restoring the pre-merge working tree. */
+  /**
+   * Abort an in-progress merge, restoring the pre-merge working tree.
+   * @param dir - the memory store directory.
+   */
   async abortMerge(dir: string): Promise<void> {
     await this.git(dir, ['merge', '--abort'])
   }

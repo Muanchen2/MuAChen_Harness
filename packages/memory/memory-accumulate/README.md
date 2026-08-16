@@ -1,5 +1,7 @@
 # @deepseek-ai/dsh-memory-accumulate
 
+English | [中文](README.zh.md)
+
 Rin memory accumulation: turn-end judgment proposes candidate memories for the agent to confirm.
 
 ## What this is
@@ -51,6 +53,8 @@ Injects `llm`.
 
 One `rin-accumulate` context message at the first step after a judged turn, when candidates exist:
 
+##### Candidate message
+
 ```markdown
 ## 记忆沉淀候选（来自第 3 轮）
 
@@ -59,7 +63,7 @@ One `rin-accumulate` context message at the first step after a judged turn, when
    store 目录缺失导致 spawn 失败
 ```
 
-A handoff proposal renders as a second section, when present:
+##### Handoff proposals
 
 ```markdown
 ## 交接单候选（来自第 3 轮）
@@ -74,8 +78,7 @@ A handoff proposal renders as a second section, when present:
 
 #### Token effect
 
-- Judge calls: one per judged turn, input = trailing messages (bounded by `maxInputMessages`/`maxInputBytes`), output capped by `maxOutputTokens`. A dedup verifier call follows when the ancestor chain holds memories.
-- Candidate messages: only when candidates or handoffs exist, once per session.
+Judge calls cost one auxiliary request per judged turn (input bounded by `maxInputMessages`/`maxInputBytes`, output capped by `maxOutputTokens`), plus a dedup verifier call when the ancestor chain holds memories. Candidate messages appear only when candidates or handoffs exist, once per session.
 
 #### KV Cache effect
 

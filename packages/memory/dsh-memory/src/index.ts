@@ -478,6 +478,7 @@ export class MemoryService extends Service {
    * @param workspace - workspace path (used only for `scope: 'workspace'`).
    * @param name - the new branch name, in the format `task-x/attempt-a`.
    * @throws when `name` violates the branch-name format.
+   * @returns the created branch name.
    */
   async branch(scope: MemoryScope, workspace: string | undefined, name: string): Promise<{ branch: string }> {
     const error = branchNameError(name)
@@ -489,7 +490,13 @@ export class MemoryService extends Service {
     })
   }
 
-  /** Switch to an existing branch. */
+  /**
+   * Switch to an existing branch.
+   * @param scope - which store to switch in.
+   * @param workspace - workspace path (used only for `scope: 'workspace'`).
+   * @param name - the branch to switch to.
+   * @returns the active branch name.
+   */
   async checkout(scope: MemoryScope, workspace: string | undefined, name: string): Promise<{ branch: string }> {
     return serializeWrite(async () => {
       const dir = await this.resolveStore(scope, workspace)
@@ -498,13 +505,22 @@ export class MemoryService extends Service {
     })
   }
 
-  /** The current branch name of a store. */
+  /**
+   * The current branch name of a store.
+   * @param scope - which store to read.
+   * @param workspace - workspace path (used only for `scope: 'workspace'`).
+   * @returns the active branch name, or undefined when the store has no commits yet.
+   */
   async currentBranch(scope: MemoryScope, workspace: string | undefined): Promise<string | undefined> {
     const dir = await this.resolveStore(scope, workspace)
     return this.git.currentBranch(dir)
   }
 
-  /** Every branch of a store, sorted. */
+  /** Every branch of a store, sorted.
+   * @param scope - which store to list.
+   * @param workspace - workspace path (used only for `scope: 'workspace'`).
+   * @returns the branch names of the store, sorted lexically.
+   */
   async listBranches(scope: MemoryScope, workspace: string | undefined): Promise<string[]> {
     const dir = await this.resolveStore(scope, workspace)
     return this.git.listBranches(dir)
@@ -521,6 +537,7 @@ export class MemoryService extends Service {
    * @param workspace - workspace path (used only for `scope: 'workspace'`).
    * @param from - the branch to merge into the current one.
    * @param strategy - conflict resolution strategy for the merge.
+   * @returns the merge outcome: committed node ids on success, or per-node conflicts to reconcile.
    */
   async merge(
     scope: MemoryScope,

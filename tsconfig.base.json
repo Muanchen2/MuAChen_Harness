@@ -226,6 +226,9 @@
       "@deepseek-ai/dsh-sdk-client": ["./packages/sdk/client/src"],
       "@deepseek-ai/dsh-sdk-protocol": ["./packages/sdk/protocol/src"],
       "@deepseek-ai/dsh-sdk-jsonrpc-server": ["./packages/sdk/server/src"],
+      // dsh-memory's package suffix is `memory` while its directory is `dsh-memory`,
+      // so the generic wildcard would map it to packages/memory/memory/src.
+      "@deepseek-ai/dsh-memory": ["./packages/memory/dsh-memory/src"],
       "@deepseek-ai/dsh-*": [
         "./packages/core/*/src",
         "./packages/prompt/*/src",

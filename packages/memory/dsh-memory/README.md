@@ -1,5 +1,7 @@
 # @deepseek-ai/dsh-memory
 
+English | [中文](README.zh.md)
+
 Rin memory service (`ctx.memories`): cross-session project-experience memory backed by git, distinct from skills.
 
 ## What this is

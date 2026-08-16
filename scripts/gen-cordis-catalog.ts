@@ -75,6 +75,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   llm: 'llm-streaming.md',
   lsp: 'lsp.md',
   messageFeedback: 'feedback.md',
+  memories: 'memory.md',
   permissionPresets: 'permission-presets.md',
   planMode: 'plan.md',
   terminals: 'terminal.md',
@@ -491,6 +492,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
 /** TypeScript lib and pinned framework types with no repository-owned data page. */
 export const FOUNDATION_TYPE_NAMES: ReadonlySet<string> = new Set([
   'AbortSignal',
+  'Array',
   'AsyncIterable',
   'Context',
   'Error',
@@ -578,6 +580,15 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   WorkflowAgentEndInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowAgentInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowResultInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
+  MemoryScope: 'memory store selector is owned by packages/memory/dsh-memory/README.md',
+  MemoryNode: 'memory node record is owned by packages/memory/dsh-memory/README.md',
+  MemoryWriteResult: 'memory write result is owned by packages/memory/dsh-memory/README.md',
+  MemoryTimelineEntry: 'memory timeline entry is owned by packages/memory/dsh-memory/README.md',
+  SearchHit: 'memory search hit is owned by packages/memory/dsh-memory/README.md',
+  ChainStore: 'memory ancestor-chain store is owned by packages/memory/dsh-memory/README.md',
+  ChainContent: 'memory ancestor-chain content is owned by packages/memory/dsh-memory/README.md',
+  MergeResult: 'memory merge result is owned by packages/memory/dsh-memory/README.md',
+  NodeDiff: 'memory node diff is owned by packages/memory/dsh-memory/README.md',
 }
 
 /** Repository data policy consumed by the Cordis catalog projector. */

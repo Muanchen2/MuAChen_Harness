@@ -38,6 +38,8 @@ import * as ToolSubagentListAgents from '@deepseek-ai/dsh-tool-subagent-control/
 import * as ToolSubagentReport from '@deepseek-ai/dsh-tool-subagent-report'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import * as SkillFileSystem from '@deepseek-ai/dsh-skill-filesystem'
+import MemoryService from '@deepseek-ai/dsh-memory'
+import * as ToolMemory from '@deepseek-ai/dsh-tool-memory'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as ToolAskUser from '@deepseek-ai/dsh-tool-ask-user'
 import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
@@ -420,6 +422,20 @@ const TOOL_PACKAGES: ToolPackage[] = [
       })
       await ctx.plugin(ToolSkill)
     },
+  },
+  {
+    pkg: '@deepseek-ai/dsh-tool-memory',
+    dir: 'tool-memory',
+    source: 'packages/memory/tool-memory/src/index.ts',
+    requires: ['ctx.tools', 'ctx.memories', 'ctx.systemPrompt'],
+    writes: ['tool/call', 'tool/result', 'git commits in the memory store'],
+    async mount(ctx) {
+      await ctx.plugin(LocalSubprocessRuntime)
+      await ctx.plugin(MemoryService, { centralRoot: resolve(root, '.tmp/tool-catalog/memory-central') })
+      await ctx.plugin(ToolMemory)
+    },
+    note:
+      'The memory tool renders the Rin git-backed store operations; schema harvest mounts the local subprocess runtime so the service constructor resolves without touching a real store.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-session-query',

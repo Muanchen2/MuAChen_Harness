@@ -274,17 +274,32 @@ function parseList(text: string, key: 'candidates' | 'handoffs', max: number): M
   }
 }
 
-/** Parse the judge's candidate-memory list tolerantly (code fences and stray prose allowed). */
+/**
+ * Parse the judge's candidate-memory list tolerantly (code fences and stray prose allowed).
+ * @param text - the judge's raw output text.
+ * @param max - maximum number of candidates to keep.
+ * @returns the parsed candidates, best first.
+ */
 export function parseCandidates(text: string, max: number): MemoryCandidate[] {
   return parseList(text, 'candidates', max)
 }
 
-/** Parse the judge's handoff-memo list tolerantly (code fences and stray prose allowed). */
+/**
+ * Parse the judge's handoff-memo list tolerantly (code fences and stray prose allowed).
+ * @param text - the judge's raw output text.
+ * @param max - maximum number of handoffs to keep.
+ * @returns the parsed handoff memos.
+ */
 export function parseHandoffs(text: string, max: number): MemoryCandidate[] {
   return parseList(text, 'handoffs', max)
 }
 
-/** Parse the judge's stale-memory archive proposals tolerantly. */
+/**
+ * Parse the judge's stale-memory archive proposals tolerantly.
+ * @param text - the judge's raw output text.
+ * @param max - maximum number of archive proposals to keep.
+ * @returns the parsed archive candidates.
+ */
 export function parseArchives(text: string, max: number): ArchiveCandidate[] {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')

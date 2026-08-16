@@ -290,6 +290,9 @@ function slug(value: string | undefined): string | undefined {
  * Ids sharing `id`'s exact parent path (excluding `id` itself), sorted.
  * Root-level ids match other root-level ids; a nested id only matches ids in
  * its own directory, never descendants.
+ * @param ids - the candidate id list.
+ * @param id - the id whose siblings to find.
+ * @returns the sibling ids, sorted.
  */
 export function similarIds(ids: readonly string[], id: string): string[] {
   const parent = id.includes('/') ? id.slice(0, id.lastIndexOf('/')) : ''

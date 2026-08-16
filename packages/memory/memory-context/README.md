@@ -1,5 +1,7 @@
 # @deepseek-ai/dsh-memory-context
 
+English | [中文](README.zh.md)
+
 Rin memory context injection: the ancestor chain's memories ride the first turn.
 
 ## What this is
@@ -35,6 +37,8 @@ The chain resolves from the session's `header.cwd` upward through `@deepseek-ai/
 
 One user-role catalogue message in the first turn's request, when any store on the ancestor chain (or central) has memory — one section per store, nearest first, listing titles and ids only. Contents are fetched on demand through the `memory` tool, so the agent chooses what is relevant instead of receiving everything:
 
+##### Catalogue message
+
 ```markdown
 ## Rin 记忆目录（workspace）
 
@@ -52,7 +56,11 @@ One user-role catalogue message in the first turn's request, when any store on t
 需要详细内容时，用 memory read（scope 可选 workspace/chain/central）按 id 查询。
 ```
 
+##### Store labels
+
+```markdown
 The session's own store is labelled `workspace`; ancestor stores use their `..`-relative path from the session directory. Empty stores contribute nothing.
+```
 
 #### Token effect
 
