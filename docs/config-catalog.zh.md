@@ -1279,6 +1279,92 @@ export interface ReconnectConfig {
 
 来源：[`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
 
+<a id="deepseek-aidsh-memory"></a>
+
+## `@deepseek-ai/dsh-memory`
+
+```ts config-catalog
+/** Config for the memory service. Storage roots are directory locations for each store scope. */
+export interface Config {
+  /** Central (cross-project) memory store directory. Defaults to `<dshHome>/memory`. */
+  centralRoot?: string
+}
+```
+
+来源：[`packages/memory/dsh-memory/src/index.ts:73`](../packages/memory/dsh-memory/src/index.ts)
+
+<a id="deepseek-aidsh-memory-accumulate"></a>
+
+## `@deepseek-ai/dsh-memory-accumulate`
+
+需要：`llm` · `memories`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /**
+   * When to run the judge:
+   * - `on-activity` (default): only turns with tool results.
+   * - `always`: every turn end.
+   * - `keyframe`: only at keyframes — a cheap rule pre-filter (wrap-up words,
+   *   user-topic shift) or the `judgeInterval` fallback — so long sessions
+   *   stop paying one LLM call per active turn; the judge itself confirms
+   *   whether the fragment is a real keyframe and otherwise outputs nothing.
+   */
+  trigger?: 'on-activity' | 'always' | 'keyframe'
+  /** Max candidate memories or handoff memos one turn may produce. */
+  maxCandidates?: number
+  /** How many trailing messages the judge sees. */
+  maxInputMessages?: number
+  /** Max UTF-8 bytes of the framed judge input. */
+  maxInputBytes?: number
+  /** Judge output-token cap. */
+  maxOutputTokens?: number
+  /** Judge request deadline in milliseconds. */
+  timeoutMs?: number
+  /** Keyframe fallback: judge at least every N turns (keyframe trigger only). */
+  judgeInterval?: number
+  /**
+   * Rescue judgment before session compaction: when the harness compacts a
+   * long conversation into a summary, the pre-compaction tail would otherwise
+   * be invisible to the model forever. On `compaction/start` the plugin frames
+   * the tail synchronously (before the replacement lands) and runs one judge
+   * pass, so experience and handoff needs are distilled into memory first.
+   */
+  rescueOnCompact?: boolean
+  /** Optional explicit provider route; must be paired with `model`. */
+  provider?: string
+  /** Optional explicit model id; must be paired with `provider`. */
+  model?: string
+}
+```
+
+来源：[`packages/memory/memory-accumulate/src/index.ts:67`](../packages/memory/memory-accumulate/src/index.ts)
+
+<a id="deepseek-aidsh-memory-context"></a>
+
+## `@deepseek-ai/dsh-memory-context`
+
+需要：`memories`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /** Max rendered catalogue bytes; sections beyond the budget are dropped from the tail (farthest levels first). */
+  maxBytes?: number
+  /**
+   * Automatic recall from turn 2 on: each request retrieves the top-N most
+   * relevant stored memories (by keyword search over the latest user
+   * message) and injects their summaries, so the agent reasons with relevant
+   * experience at hand like a human recalling it — without being asked. Ids
+   * already recalled in this session are not repeated. `0` disables recall.
+   */
+  recallTopN?: number
+}
+```
+
+来源：[`packages/memory/memory-context/src/index.ts:63`](../packages/memory/memory-context/src/index.ts)
+
 <a id="deepseek-aidsh-message-feedback"></a>
 
 ## `@deepseek-ai/dsh-message-feedback`
@@ -1462,6 +1548,40 @@ export interface Config {
 ```
 
 来源：[`packages/guard/repeat-tool-reminder/src/index.ts:28`](../packages/guard/repeat-tool-reminder/src/index.ts)
+
+<a id="deepseek-aidsh-rin-skill-filesystem"></a>
+
+## `@deepseek-ai/dsh-rin-skill-filesystem`
+
+需要：`skills`
+
+```ts config-catalog
+/** Configuration for the hierarchical Rin skill provider. */
+export interface Config {
+  /** Whether the DSH project and user roots are included around the Rin chain. */
+  includeDefaultRoots?: boolean
+  /** DeepSeek Harness config root containing the shared `skills` directory. */
+  dshHome?: string
+  /** Additional skill roots scanned after the Rin chain. */
+  customSkillDirs?: string[]
+  /** Whether host-local skill roots are watched for catalog changes. */
+  watch?: boolean
+  /** Whether Chokidar uses polling for existing skill roots. */
+  watchUsePolling?: boolean
+  /** Stable-write window for watched skill entries, in milliseconds. */
+  watchStabilityThresholdMs?: number
+  /** Polling and missing-path probe interval, in milliseconds. */
+  watchPollIntervalMs?: number
+  /** Maximum number of workspace cwd watcher groups retained. */
+  watchMaxProjects?: number
+  /** Whether watched symbolic links follow their target files. */
+  watchFollowSymlinks?: boolean
+  /** Explicit packaged skill root. */
+  bundledSkillDir?: string
+}
+```
+
+来源：[`packages/skill/rin-filesystem/src/index.ts`](../packages/skill/rin-filesystem/src/index.ts)
 
 <a id="deepseek-aidsh-sandbox-local"></a>
 
@@ -1874,13 +1994,15 @@ export interface Config {
 export interface Config {
   /** Unique provider name. Defaults to `local`. */
   providerName?: string
+  /** Select the standard two-level roots or Rin's directory-chain roots. */
+  rootMode?: 'standard' | 'rin'
   /** Whether project and user roots are included around custom roots. */
   includeDefaultRoots?: boolean
   /** DeepSeek Harness config root. Defaults to `$DSH_HOME` or `~/.dsh`. */
   dshHome?: string
   /** Shared agent config root. Defaults to `$DSH_AGENTS_HOME` or `~/.agents`. */
   agentsHome?: string
-  /** Additional skill roots scanned after project roots and before user roots. */
+  /** Additional skill roots scanned after workspace roots and before the user root. */
   customSkillDirs?: string[]
   /** Whether host-local skill roots are watched for catalog changes. */
   watch?: boolean
@@ -2500,6 +2622,22 @@ export interface Config {
 ```
 
 来源：[`packages/lsp/tool-lsp/src/index.ts:58`](../packages/lsp/tool-lsp/src/index.ts)
+
+<a id="deepseek-aidsh-tool-memory"></a>
+
+## `@deepseek-ai/dsh-tool-memory`
+
+需要：`tools` · `memories` · `systemPrompt`
+
+```ts config-catalog
+/** Tool configuration. */
+export interface Config {
+  /** Where the system-prompt guidance section appears. */
+  sectionOrder?: number
+}
+```
+
+来源：[`packages/memory/tool-memory/src/index.ts:26`](../packages/memory/tool-memory/src/index.ts)
 
 <a id="deepseek-aidsh-tool-pwsh"></a>
 

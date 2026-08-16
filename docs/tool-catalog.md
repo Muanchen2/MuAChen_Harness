@@ -31,6 +31,7 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-lsp` | `lsp` | `ctx.tools`, `ctx.lsp`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | The lsp tool keeps provider selection and language-server subprocesses behind ctx.lsp, so its model-visible schema stays stable across providers. Requires a registered provider (e.g. `@deepseek-ai/dsh-lsp-stdio`) at runtime; without one, a query returns the structured `LSP_UNAVAILABLE` error rather than changing the schema. |
 | `@deepseek-ai/dsh-tool-ralph` | `ralph` | `ctx.tools`, `ctx.workflowEngine`, `ctx.subagents`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents every fresh round)` | `tool/call`, `tool/result`, `workflow and child session events during execution` | - | A fixed foreground workflow starts one fresh structured child per round; the model selects only the immutable objective and an optional round cap. |
 | `@deepseek-ai/dsh-tool-skill` | `skill` | `ctx.tools`, `ctx.agents`, `ctx.skills` | `tool/call`, `tool/result`, `user/message replacement catalogs via agent.inject()` | - | - |
+| `@deepseek-ai/dsh-tool-memory` | `memory` | `ctx.tools`, `ctx.memories`, `ctx.systemPrompt` | `tool/call`, `tool/result`, `git commits in the memory store` | - | The memory tool renders the Rin git-backed store operations; schema harvest mounts the local subprocess runtime so the service constructor resolves without touching a real store. |
 | `@deepseek-ai/dsh-tool-session-query` | `session_event_read`, `session_event_search`, `session_event_trace`, `session_search`, `session_trace` | `ctx.tools`, `ctx.systemPrompt`, `ctx.sessionQuery`, `a calling Agent for workspace authority` | `tool/call`, `tool/result` | - | The five read-only tools hide provider cursors and authorize every result from the immutable calling agent session. The package is opt-in; compositions that need enforced deadlines or bounded inline output also mount the generic timeout or spill policies. |
 | `@deepseek-ai/dsh-tool-subagent` | `subagent` | `ctx.tools`, `ctx.subagents`, `ctx.systemPrompt` | `tool/call`, `tool/result`, `child session events through the chosen provider` | `subagent`, `subagent_fork` | The registered tool name is the load-time `toolName` config (default `subagent`); the schema above is that default. The shipped compositions load this package once per subagent backend, so the model additionally sees `subagent_fork` bound to the fork backend. Each instance's description, `run_in_background` parameter, and system-prompt policy follow its own `backgroundMode` and `enableRunInBackground`, so the two shipped schemas are not identical: `subagent` is `continuable` and defaults omitted calls to background with automatic settlement delivery, while `subagent_fork` stays `one-shot` and defaults them to foreground — see `packages/bundle/base/cordis.patch.yml` and `examples/acp-agent/cordis.yml`. |
 | `@deepseek-ai/dsh-tool-subagent-control` | `interrupt_agent`, `list_agents`, `send_message` | `ctx.tools`, `ctx.subagents`, `ctx.agents and ctx.sessionProjections (list_agents only)` | `tool/call`, `tool/result`, `child session events through ctx.subagents` | - | The globally named control tools over continuable background subagents: provider-bound `tool-subagent` instances register distinct delegation tools, while this package registers `send_message` and `interrupt_agent` once, plus `list_agents` from its separately loaded `/list-agents` plugin (whose catalog rows use the sessionProjections and live Agent registries). |
@@ -1232,6 +1233,90 @@ Load the full instructions for an available skill. Call this with the exact skil
 ```
 
 Source: [`packages/skill/tool-skill/src/index.ts`](../packages/skill/tool-skill/src/index.ts)
+
+<a id="deepseek-aidsh-tool-memory"></a>
+
+## `@deepseek-ai/dsh-tool-memory`
+
+### `memory`
+
+Persist or recall cross-session project experience (memory), distinct from skills (methods).
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "remember",
+        "read",
+        "list",
+        "search",
+        "timeline",
+        "diff",
+        "revert",
+        "branch",
+        "checkout",
+        "current-branch",
+        "list-branches",
+        "merge",
+        "remove",
+        "archive",
+        "unarchive"
+      ]
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "workspace",
+        "central",
+        "chain"
+      ]
+    },
+    "id": {
+      "type": "string",
+      "description": "Memory node id for read/timeline, or the id to save under for remember."
+    },
+    "query": {
+      "type": "string",
+      "description": "Full-text search query for memory search (case-insensitive literal match over node bodies)."
+    },
+    "revision": {
+      "type": "string",
+      "description": "Git revision to restore for revert (take it from timeline output)."
+    },
+    "title": {
+      "type": "string",
+      "description": "Title for remember; the new memory heading."
+    },
+    "content": {
+      "type": "string",
+      "description": "Body for remember; the experience to persist."
+    },
+    "message": {
+      "type": "string",
+      "description": "Optional one-line commit note for this change."
+    },
+    "strategy": {
+      "type": "string",
+      "description": "Conflict resolution for merge: ours (keep target) or theirs (keep merged)."
+    },
+    "prefix": {
+      "type": "string",
+      "description": "Optional id prefix filter for list (e.g. archive/ to browse the archive, handoff/ for handoff memos)."
+    }
+  },
+  "required": [
+    "action",
+    "scope"
+  ]
+}
+```
+
+Source: [`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
+
+The memory tool renders the Rin git-backed store operations; schema harvest mounts the local subprocess runtime so the service constructor resolves without touching a real store.
 
 <a id="deepseek-aidsh-tool-session-query"></a>
 

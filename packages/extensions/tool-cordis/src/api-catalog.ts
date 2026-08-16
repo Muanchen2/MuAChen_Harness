@@ -882,6 +882,138 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'memories',
+    summary: 'Memory store service over git-backends.',
+    description: 'Memory store service over git-backends.',
+    methods: [
+      {
+        signature: 'async remember( scope: MemoryScope, workspace: string | undefined, input: { id: string; title: string; content: string; message?: string }, ): Promise<MemoryWriteResult>',
+        description: 'Write one memory node to a store, committing the change so it is recorded and revertable.',
+        parameters: [{ name: 'scope', description: 'which store to write into.' }, { name: 'workspace', description: 'resolver for the workspace path (used only for `scope: \'workspace\'`).' }, { name: 'input', description: 'the memory title/content and the message describing this change.' }],
+        returns: 'the node and its full change timeline.',
+      },
+      {
+        signature: 'async read( scope: MemoryScope, workspace: string | undefined, id: string, ): Promise<{ node: MemoryNode; timeline: MemoryTimelineEntry[] } | undefined>',
+        description: 'Read one memory node and its timeline.',
+        parameters: [{ name: 'scope', description: 'which store to read from.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'id', description: 'the memory node id.' }],
+        returns: 'the node and timeline, or undefined when absent.',
+      },
+      {
+        signature: 'async search(scope: MemoryScope, workspace: string | undefined, query: string): Promise<SearchHit[]>',
+        description: 'Full-text search one store: case-insensitive literal matches over node bodies, ranked by match count. Archived nodes are excluded.',
+        parameters: [{ name: 'scope', description: 'which store to search.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'query', description: 'the literal text to find; empty queries yield no hits.' }],
+        returns: 'the top hits, best match first.',
+      },
+      {
+        signature: 'async searchChain(workspace: string, query: string): Promise<Array<{ store: string; hits: SearchHit[] }>>',
+        description: 'Full-text search every store on the ancestor chain, nearest first, then the central store — the search counterpart of `loadChain`.',
+        parameters: [{ name: 'workspace', description: 'the directory whose ancestor chain to search.' }, { name: 'query', description: 'the literal text to find.' }],
+        returns: 'one entry per store with at least one hit.',
+      },
+      {
+        signature: 'async list(scope: MemoryScope, workspace: string | undefined, prefix?: string): Promise<string[]>',
+        description: 'List the current memory node ids in a store.',
+        parameters: [{ name: 'scope', description: 'which store to scan.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'prefix', description: 'optional id prefix filter; when omitted, archived nodes (`archive/…`) are hidden so the active catalogue stays lean.' }],
+        returns: 'the sorted list of matching node ids.',
+      },
+      {
+        signature: 'async timeline(scope: MemoryScope, workspace: string | undefined, id: string): Promise<MemoryTimelineEntry[]>',
+        description: 'Read a memory node\'s complete change history, newest first.\n\nThe earliest commit that touched the node\'s file is `created`; every later commit is `updated`. Entries carry the backing git revision so future revert/diff operations can address them.',
+        parameters: [{ name: 'scope', description: 'which store to read from.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'id', description: 'the memory node id.' }],
+        returns: 'the timeline entries.',
+      },
+      {
+        signature: 'async diff(scope: MemoryScope, workspace: string | undefined, id: string): Promise<NodeDiff>',
+        description: 'Unified diff of a node\'s most recent change.',
+        parameters: [{ name: 'scope', description: 'which store to read from.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'id', description: 'the memory node id.' }],
+        returns: 'the diff, with an empty `diff` when the node was created exactly once.',
+        throws: ['when the node has no history (does not exist).'],
+      },
+      {
+        signature: 'async revert( scope: MemoryScope, workspace: string | undefined, id: string, revision: string, ): Promise<MemoryWriteResult>',
+        description: 'Restore a node to a previous revision, committed as a new change. The revert itself lands on the timeline, so nothing is ever lost.',
+        parameters: [{ name: 'scope', description: 'which store to operate on.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'id', description: 'the memory node id.' }, { name: 'revision', description: 'the git revision to restore (from `timeline`).' }],
+        returns: 'the reverted node and its updated timeline.',
+        throws: ['when the revision does not contain the node.'],
+      },
+      {
+        signature: 'async ancestorStores(workspace: string): Promise<string[]>',
+        description: 'Collect the existing memory stores along `workspace`\'s ancestor chain, nearest first, ending at the filesystem root. Levels without a store are skipped and NEVER created — chain reads must not materialize stores.',
+        parameters: [{ name: 'workspace', description: 'the directory whose ancestor chain to walk.' }],
+        returns: 'absolute store directories (`<dir>/.dsh-memory`), nearest first.',
+      },
+      {
+        signature: 'async listChain(workspace: string): Promise<ChainStore[]>',
+        description: 'List the memory node ids of the complete inheritance chain: every existing store along `workspace`\'s ancestor directories, nearest first, followed by the central (global) store when it has content.',
+        parameters: [{ name: 'workspace', description: 'the directory whose ancestor chain to walk.' }],
+        returns: 'one entry per existing, committed store on the chain.',
+      },
+      {
+        signature: 'async loadChain(workspace: string): Promise<ChainContent[]>',
+        description: 'Load every memory node of the complete inheritance chain — the injection view: ancestor-directory stores nearest first, then the central store.',
+        parameters: [{ name: 'workspace', description: 'the directory whose ancestor chain to walk.' }],
+        returns: 'one entry per existing, committed store with its full nodes.',
+      },
+      {
+        signature: 'async readChain( workspace: string, id: string, ): Promise<{ node: MemoryNode; timeline: MemoryTimelineEntry[]; store: string } | undefined>',
+        description: 'Read one node from the complete inheritance chain, nearest store first, falling back to the central store.',
+        parameters: [{ name: 'workspace', description: 'the directory whose ancestor chain to walk.' }, { name: 'id', description: 'the memory node id.' }],
+        returns: 'the node, its timeline, and the store that held it; undefined when absent everywhere.',
+      },
+      {
+        signature: 'async branch(scope: MemoryScope, workspace: string | undefined, name: string): Promise<{ branch: string }>',
+        description: 'Create a branch from the current HEAD and switch to it — the start of a parallel conclusion line (e.g. two approaches explored at once).',
+        parameters: [{ name: 'scope', description: 'which store to branch.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'name', description: 'the new branch name, in the format `task-x/attempt-a`.' }],
+        returns: 'the created branch name.',
+        throws: ['when `name` violates the branch-name format.'],
+      },
+      {
+        signature: 'async checkout(scope: MemoryScope, workspace: string | undefined, name: string): Promise<{ branch: string }>',
+        description: 'Switch to an existing branch.',
+        parameters: [{ name: 'scope', description: 'which store to switch in.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'name', description: 'the branch to switch to.' }],
+        returns: 'the active branch name.',
+      },
+      {
+        signature: 'async currentBranch(scope: MemoryScope, workspace: string | undefined): Promise<string | undefined>',
+        description: 'The current branch name of a store.',
+        parameters: [{ name: 'scope', description: 'which store to read.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }],
+        returns: 'the active branch name, or undefined when the store has no commits yet.',
+      },
+      {
+        signature: 'async listBranches(scope: MemoryScope, workspace: string | undefined): Promise<string[]>',
+        description: 'Every branch of a store, sorted.',
+        parameters: [{ name: 'scope', description: 'which store to list.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }],
+        returns: 'the branch names of the store, sorted lexically.',
+      },
+      {
+        signature: 'async merge( scope: MemoryScope, workspace: string | undefined, from: string, strategy?: \'ours\' | \'theirs\', ): Promise<MergeResult>',
+        description: 'Merge `from` into the current branch. A clean merge commits and reports the node ids it brought in. Conflicts roll the merge back and report both sides per node — the caller reconciles (e.g. updates the target node to a combined conclusion) and retries, optionally with a conflict strategy that resolves conflicts in favor of the current branch (`ours`) or the merged branch (`theirs`).',
+        parameters: [{ name: 'scope', description: 'which store to merge in.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'from', description: 'the branch to merge into the current one.' }, { name: 'strategy', description: 'conflict resolution strategy for the merge.' }],
+        returns: 'the merge outcome: committed node ids on success, or per-node conflicts to reconcile.',
+      },
+      {
+        signature: 'async remove(scope: MemoryScope, workspace: string | undefined, id: string): Promise<void>',
+        description: 'Permanently delete a node from a store, committed so the removal is recorded and revertable through git history.',
+        parameters: [{ name: 'scope', description: 'which store to remove from.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'id', description: 'the memory node id.' }],
+        throws: ['when the node does not exist.'],
+      },
+      {
+        signature: 'async archive(scope: MemoryScope, workspace: string | undefined, id: string): Promise<{ id: string }>',
+        description: 'Move a node out of the active catalogue into `archive/<id>`, committed. Archived nodes are hidden from listings and context injection but remain readable as `archive/<id>` and restorable via `unarchive`.',
+        parameters: [{ name: 'scope', description: 'which store to archive in.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'id', description: 'the memory node id.' }],
+        returns: 'the archived id (`archive/<id>`).',
+        throws: ['when the node does not exist.'],
+      },
+      {
+        signature: 'async unarchive(scope: MemoryScope, workspace: string | undefined, id: string): Promise<{ id: string }>',
+        description: 'Restore an archived node back to its original id, committed. Accepts the archived id (`archive/<id>`) or the bare original id.',
+        parameters: [{ name: 'scope', description: 'which store to restore in.' }, { name: 'workspace', description: 'workspace path (used only for `scope: \'workspace\'`).' }, { name: 'id', description: 'the archived (or original) node id.' }],
+        returns: 'the restored id.',
+        throws: ['when no archived node exists for that id.'],
+      },
+    ],
+  },
+  {
     key: 'messageFeedback',
     summary: 'Storage-domain sidecar service.',
     description: 'Storage-domain sidecar service. It inspects persisted Session history and never creates or resumes an Agent or Session.',
@@ -2738,6 +2870,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface CancelOptions {\n    keepInbox?: boolean | undefined;\n}',
   },
   {
+    name: 'ChainContent',
+    declaration: 'export interface ChainContent {\n    readonly store: string;\n    readonly scope: MemoryScope;\n    readonly nodes: MemoryNode[];\n}',
+  },
+  {
+    name: 'ChainStore',
+    declaration: 'export interface ChainStore {\n    readonly store: string;\n    readonly ids: string[];\n}',
+  },
+  {
     name: 'ClientResponse',
     declaration: 'export interface ClientResponse {\n    type: \'client-response\';\n    rpcId: RpcId;\n    result: RpcResult<unknown>;\n}',
   },
@@ -3362,6 +3502,26 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
   },
   {
+    name: 'MemoryNode',
+    declaration: 'export interface MemoryNode {\n    readonly id: string;\n    readonly title: string;\n    readonly content: string;\n    readonly scope: MemoryScope;\n    readonly branch: string;\n}',
+  },
+  {
+    name: 'MemoryTimelineEntry',
+    declaration: 'export interface MemoryTimelineEntry {\n    readonly revision: string;\n    readonly at: string;\n    readonly action: \'created\' | \'updated\' | \'deleted\' | \'relinked\';\n    readonly title?: string;\n    readonly message: string;\n}',
+  },
+  {
+    name: 'MemoryWriteResult',
+    declaration: 'export interface MemoryWriteResult {\n    readonly node: MemoryNode;\n    readonly timeline: MemoryTimelineEntry[];\n}',
+  },
+  {
+    name: 'MergeConflict',
+    declaration: 'export interface MergeConflict {\n    readonly id: string;\n    readonly toContent: string;\n    readonly fromContent: string;\n}',
+  },
+  {
+    name: 'MergeResult',
+    declaration: 'export interface MergeResult {\n    readonly merged: string[];\n    readonly conflicts: MergeConflict[];\n}',
+  },
+  {
     name: 'Message',
     declaration: 'export interface Message {\n    readonly id: MessageId;\n    readonly role: \'system\' | \'user\' | \'assistant\';\n    readonly content: ContentBlock[];\n    readonly source: MessageSource;\n}',
   },
@@ -3464,6 +3624,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ModelModalityMap',
     declaration: 'export interface ModelModalityMap {\n    text: \'text\';\n    image: \'image\';\n}',
+  },
+  {
+    name: 'NodeDiff',
+    declaration: 'export interface NodeDiff {\n    readonly id: string;\n    readonly diff: string;\n}',
   },
   {
     name: 'ObjectJsonSchema',
@@ -3700,6 +3864,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SearchFileMatches',
     declaration: 'export interface SearchFileMatches {\n    path: string;\n    matches: SearchLineMatch[];\n}',
+  },
+  {
+    name: 'SearchHit',
+    declaration: 'export interface SearchHit {\n    readonly id: string;\n    readonly title: string;\n    readonly snippet: string;\n    readonly matchCount: number;\n}',
   },
   {
     name: 'SearchLineMatch',
@@ -4051,7 +4219,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SkillSource',
-    declaration: 'export type SkillSource = \'project-dsh\' | \'project-agents\' | \'runtime\' | \'user-dsh\' | \'user-agents\' | \'custom\' | \'bundled\' | (string & {});',
+    declaration: 'export type SkillSource = \'project-dsh\' | \'project-agents\' | \'rin-workspace\' | \'rin-user\' | \'runtime\' | \'user-dsh\' | \'user-agents\' | \'custom\' | \'bundled\' | (string & {});',
   },
   {
     name: 'SkillSummary',
