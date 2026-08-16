@@ -200,11 +200,17 @@ describe('apply (plugin lifecycle)', () => {
     await fiber.dispose()
   })
 
-  it('rejects a duplicate serverName at load and leaves the first instance intact', async () => {
+  it('skips a duplicate serverName at load and leaves the first instance intact', async () => {
     await apply(ctx, stdioConfig)
     expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
 
-    await expect(apply(ctx, stdioConfig)).rejects.toThrow(/serverName "srv" is already in use/)
+    // A second instance with the same serverName (one preset mounted by two
+    // sessions of one host) degrades to a warning instead of failing: its
+    // tools are already served by the first instance.
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    await expect(apply(ctx, stdioConfig)).resolves.toBeUndefined()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('already in use'))
+    warn.mockRestore()
     expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
   })
 

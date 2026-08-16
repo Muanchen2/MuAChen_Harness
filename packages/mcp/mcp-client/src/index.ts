@@ -143,20 +143,26 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // effect registers.
   const reconnect = resolveReconnectPolicy(config.reconnect, `mcp-client(${config.serverName}): reconnect`)
 
-  // Reserve the namespace next: a duplicate `serverName` fails THIS instance
-  // at load with an actionable error and leaves the earlier instance intact.
+  // Reserve the namespace: a duplicate `serverName` means another instance
+  // already owns the `mcp__<serverName>__*` tools for this app. That is the
+  // normal shape of one preset mounted by two sessions of the same host —
+  // not a configuration error. Degrade to a warning and skip this instance
+  // (its server is already served by the earlier one) instead of failing the
+  // whole mount, which would take down the entire session for a duplicated
+  // tool namespace.
+  let names = activeServerNames.get(ctx.root)
+  if (!names) {
+    names = new Set()
+    activeServerNames.set(ctx.root, names)
+  }
+  if (names.has(config.serverName)) {
+    ctx.logger.warn(
+      `mcp-client: serverName "${config.serverName}" is already in use by another mcp-client instance; skipping this instance (its tools are served by the earlier one)`,
+    )
+    return
+  }
+  names.add(config.serverName)
   ctx.effect(() => {
-    let names = activeServerNames.get(ctx.root)
-    if (!names) {
-      names = new Set()
-      activeServerNames.set(ctx.root, names)
-    }
-    if (names.has(config.serverName)) {
-      throw new Error(
-        `mcp-client: serverName "${config.serverName}" is already in use by another mcp-client instance — pick a unique serverName in cordis.yml`,
-      )
-    }
-    names.add(config.serverName)
     return () => void names.delete(config.serverName)
   }, 'mcp-client.serverName')
 

@@ -155,7 +155,7 @@ describe('fixture server — controlled scenarios', () => {
 })
 
 describe('fixture server — duplicate serverName', () => {
-  it('rejects a second instance with the same serverName on one root', async () => {
+  it('skips a second instance with the same serverName on one root', async () => {
     const ctx = await mountRegistry()
     const config: Config = {
       transport: 'stdio',
@@ -169,7 +169,8 @@ describe('fixture server — duplicate serverName', () => {
     }
     await apply(ctx, config)
 
-    await expect(apply(ctx, config)).rejects.toThrow(/serverName "dup" is already in use/)
+    // The duplicate degrades to a skip: the first instance keeps its tools.
+    await expect(apply(ctx, config)).resolves.toBeUndefined()
 
     await ctx.fiber.dispose()
     await sleep(200)
