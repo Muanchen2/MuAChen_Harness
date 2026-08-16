@@ -49,3 +49,4 @@ dsh-web.log
 /WebView2Loader.dll
 /start.exe.WebView2/
 /tools/desktop-shell/
+/start.exe.old
