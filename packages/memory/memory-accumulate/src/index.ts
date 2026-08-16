@@ -22,7 +22,7 @@ import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { BlockAssembler, createUserMessage, deepFreeze } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import type { MemoryService } from '@deepseek-ai/dsh-memory'
-import type { Session } from '@deepseek-ai/dsh-session'
+import { deriveEventMessage, type Session } from '@deepseek-ai/dsh-session'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { deadline, MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -77,9 +77,17 @@ export interface Config {
   trigger?: 'on-activity' | 'always' | 'keyframe'
   /** Max candidate memories or handoff memos one turn may produce. */
   maxCandidates?: number
-  /** How many trailing messages the judge sees. */
+  /**
+   * How many trailing messages of the judged turn the judge sees. The window
+   * is the turn's own surface messages (a single long turn keeps its full
+   * middle), capped at this many trailing messages.
+   */
   maxInputMessages?: number
-  /** Max UTF-8 bytes of the framed judge input. */
+  /**
+   * Max UTF-8 bytes of the framed judge input. Inputs over the cap are
+   * trimmed from the head (the newest messages survive) instead of skipping
+   * judgment.
+   */
   maxInputBytes?: number
   /** Judge output-token cap. */
   maxOutputTokens?: number
@@ -104,8 +112,8 @@ export interface Config {
 export const Config: Schema<Config> = z.object({
   trigger: z.union([z.const('on-activity'), z.const('always'), z.const('keyframe')]).default('on-activity'),
   maxCandidates: z.number().step(1).min(1).default(2),
-  maxInputMessages: z.number().step(1).min(1).default(12),
-  maxInputBytes: z.number().step(1).min(1).default(16 * 1024),
+  maxInputMessages: z.number().step(1).min(1).default(30),
+  maxInputBytes: z.number().step(1).min(1).default(32 * 1024),
   maxOutputTokens: z.number().step(1).min(1).default(512),
   timeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(30_000),
   judgeInterval: z.number().step(1).min(1).default(6),
@@ -250,6 +258,46 @@ function frameMessages(messages: readonly Message[]): string {
       .join(' '),
   }))
   return `待筛选的会话片段（JSON 数组）：\n${JSON.stringify(view)}`
+}
+
+/**
+ * Frame `messages`, trimming from the head until the framed input fits
+ * `maxBytes`. The newest messages always survive — an oversized turn is
+ * judged from its tail instead of being skipped silently.
+ */
+function frameWithinBytes(messages: readonly Message[], maxBytes: number): string {
+  let keep = messages.length
+  for (;;) {
+    const framed = frameMessages(messages.slice(-keep))
+    if (keep === 1 || Buffer.byteLength(framed, 'utf8') <= maxBytes) return framed
+    keep -= 1
+  }
+}
+
+/**
+ * The surface messages belonging to `turn`: every message event appended at
+ * or after the turn's own `turn/start` boundary, in model-visible order. A
+ * long turn keeps its full middle instead of bleeding into an arbitrary
+ * trailing window. Falls back to the full derived history when no matching
+ * boundary exists (a first-turn judge or an unknown turn number).
+ */
+function turnSurfaceMessages(session: Session, turn: number): Message[] {
+  let startSeq: number | undefined
+  for (const event of session.events) {
+    if (event.type !== 'turn/start') continue
+    if ((event.data as { turn?: unknown } | undefined)?.turn === turn) startSeq = event.seq
+  }
+  if (startSeq === undefined) return session.deriveMessages()
+  const messages: Message[] = []
+  for (const seq of session.surface.nodes) {
+    if (seq < startSeq) continue
+    // Surface sequences are valid log indexes by construction; the non-null
+    // assertion expresses that invariant.
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const message = deriveEventMessage(session.events[seq]!)
+    if (message !== null) messages.push(message)
+  }
+  return messages
 }
 
 /** Parse one array of `{title, content}` entries from the judge's JSON answer. */
@@ -399,14 +447,22 @@ function samePayload(left: UserMessage, right: UserMessage): boolean {
 export function apply(ctx: Context, config: Config = {}): void {
   const trigger = config.trigger ?? 'on-activity'
   const maxCandidates = config.maxCandidates ?? 2
-  const maxInputMessages = config.maxInputMessages ?? 12
-  const maxInputBytes = config.maxInputBytes ?? 16 * 1024
+  const maxInputMessages = config.maxInputMessages ?? 30
+  const maxInputBytes = config.maxInputBytes ?? 32 * 1024
   const maxOutputTokens = config.maxOutputTokens ?? 512
   const timeoutMs = config.timeoutMs ?? 30_000
   const judgeInterval = config.judgeInterval ?? 6
   const rescueOnCompact = config.rescueOnCompact ?? true
 
-  const judge = async (session: Session, turn: number): Promise<void> => {
+  /**
+   * Run one judgment pass.
+   * @param session - the session whose tail or turn is judged.
+   * @param turn - the judged turn; with `tailOnly`, the turn number is
+   *   informational (rescue runs before the compacted tail disappears).
+   * @param tailOnly - use the trailing message window (rescue) instead of the
+   *   turn's own surface messages (turn-end judgment).
+   */
+  const judge = async (session: Session, turn: number, tailOnly = false): Promise<void> => {
     try {
       // Layer 1 (deterministic, zero LLM): handoff memos whose title marks
       // them complete are archived automatically — an explicit state, and
@@ -418,8 +474,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         ctx.logger.warn('memory-accumulate: no provider/model route available; skipping judgment')
         return
       }
-      const framed = frameMessages(session.deriveMessages().slice(-maxInputMessages))
-      if (Buffer.byteLength(framed, 'utf8') > maxInputBytes) return
+      const messages = tailOnly
+        ? session.deriveMessages().slice(-maxInputMessages)
+        : turnSurfaceMessages(session, turn).slice(-maxInputMessages)
+      const framed = frameWithinBytes(messages, maxInputBytes)
       // Existing memory summaries go to the judge so it does not re-propose
       // stored topics (first pass), and then to the verifier which compares
       // the generated candidates against the real stored content (second
@@ -466,7 +524,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       // captured here regardless of when the async LLM work settles.
       if (rescueOnCompact) {
         const turn = (event as { data?: { turn?: number | null } }).data?.turn
-        void judge(session, turn ?? 0)
+        // Rescue keeps the trailing window: there is no turn boundary for a
+        // standalone compaction, and the tail is exactly what would vanish.
+        void judge(session, turn ?? 0, true)
       }
       return
     }

@@ -192,6 +192,48 @@ describe('the memory accumulation plugin', () => {
     await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
   })
 
+  it('windows the judge input to the judged turn, not the trailing transcript', async () => {
+    const { ctx, adapter } = await liveContext(
+      new FakeAdapter([textChunks('{"candidates":[]}')]),
+      { trigger: 'always' },
+    )
+    const events = [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      userEvent('turn-one question', 1),
+      { type: 'turn/end', seq: 2, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+      { type: 'turn/start', seq: 3, time: 1, data: { turn: 2 } },
+      userEvent('turn-two question', 4),
+      { type: 'turn/end', seq: 5, time: 1, data: { turn: 2, reason: { kind: 'completed' } } },
+    ]
+    const agent = stubAgent(undefined, events)
+    endTurn(ctx, agent, 2)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+    const input = JSON.stringify(adapter.requests[0]?.messages ?? [])
+    expect(input).toContain('turn-two question')
+    expect(input).not.toContain('turn-one question')
+  })
+
+  it('trims oversized judge input from the head instead of skipping judgment', async () => {
+    const { ctx, adapter } = await liveContext(
+      new FakeAdapter([textChunks('{"candidates":[]}')]),
+      { trigger: 'always', maxInputBytes: 1024 },
+    )
+    const head = '头'.repeat(1000)
+    const tail = '尾'.repeat(1000)
+    const events = [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      userEvent(head, 1),
+      userEvent(tail, 2),
+      { type: 'turn/end', seq: 3, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+    ]
+    const agent = stubAgent(undefined, events)
+    endTurn(ctx, agent, 1)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+    const input = JSON.stringify(adapter.requests[0]?.messages ?? [])
+    expect(input).toContain(tail)
+    expect(input).not.toContain(head)
+  })
+
   it('does not present when the judge finds no candidates', async () => {
     const { ctx, adapter } = await liveContext(new FakeAdapter([textChunks('{"candidates":[]}')]))
     const agent = stubAgent()

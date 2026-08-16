@@ -27,8 +27,8 @@ Rin 记忆系统的写侧自动化半边（半自动蒸馏）。每次轮次末�
 |---|---|---|
 | `trigger` | `on-activity` | 何时运行判断：`on-activity`（只有带工具结果的轮次）、`always`（每个轮次末）或 `keyframe`（只在关键帧——最新用户消息以明确措辞收尾，或距上次调用已过 `judgeInterval` 轮；判断本身确认真正的关键帧，否则不输出）。 |
 | `maxCandidates` | `2` | 一轮最多产生的候选记忆或交接单数。 |
-| `maxInputMessages` | `12` | 判断可见的尾部消息数。 |
-| `maxInputBytes` | `16384` | 帧化判断输入的最大 UTF-8 字节数；更大的轮次被跳过。 |
+| `maxInputMessages` | `30` | 判断可见的被判断轮次的尾部消息数。 |
+| `maxInputBytes` | `32768` | 帧化判断输入的最大 UTF-8 字节数；超限输入从头部裁剪（最新消息保留），而不是跳过判断。 |
 | `maxOutputTokens` | `512` | 判断输出 token 上限。 |
 | `timeoutMs` | `30000` | 判断请求截止时间。 |
 | `judgeInterval` | `6` | 关键帧兜底：至少每 N 轮判断一次（仅 keyframe 触发）。 |
@@ -37,9 +37,9 @@ Rin 记忆系统的写侧自动化半边（半自动蒸馏）。每次轮次末�
 
 ## 设计
 
-- `session/event` `turn/end` → 判断（按 `trigger`：`on-activity` 需要轮内有 `tools/result`，`always` 从不跳过，`keyframe` 需要最新用户消息中的收尾措辞或距上次调用 `judgeInterval` 轮）。
+- `session/event` `turn/end` → 判断（按 `trigger`：`on-activity` 需要轮内有 `tools/result`，`always` 从不跳过，`keyframe` 需要最新用户消息中的收尾措辞或距上次调用 `judgeInterval` 轮）。轮末判断把输入窗口限定为被判断轮次自身的表面消息（从 `turn/start` 边界起），因此单个长轮次——一次响应内干完整个任务的 agent——能保留完整中间内容，而不是落入任意的尾部窗口。
 - `session/event` `compaction/start` → 救援判断（`rescueOnCompact` 时）：判断在 harness 用摘要替换前同步帧化压缩前尾部，使重要内容不会丢失于模型收缩的窗口。
-- 判断流式调用一次辅助 `ctx.llm` 请求（路由来自配置或最新 `request/header`），把尾部会话消息帧化为 JSON，请求 `{"candidates":[{title, content}], "handoffs":[{title, content}], "archives":[{id, reason}]}`，其中 `handoffs` 携带未完成任务交接单（目标/进度/下一步/遗留坑/相关文件 结构），`archives` 点名片段推翻的既有记忆；答案被宽容解析（允许代码围栏和散落散文）。既有记忆列表携带 id，使判断能点名陈旧节点。
+- 判断流式调用一次辅助 `ctx.llm` 请求（路由来自配置或最新 `request/header`），把帧化消息（JSON）作为输入，请求 `{"candidates":[{title, content}], "handoffs":[{title, content}], "archives":[{id, reason}]}`，其中 `handoffs` 携带未完成任务交接单（目标/进度/下一步/遗留坑/相关文件 结构），`archives` 点名片段推翻的既有记忆；答案被宽容解析（允许代码围栏和散落散文）。既有记忆列表携带 id，使判断能点名陈旧节点。超过 `maxInputBytes` 的输入从头部裁剪，因此长轮次从尾部被判断而不是被跳过。
 - 每次判断运行先自动归档祖先链上已完成的交接单（标题含"已完成"），然后运行 LLM 判断。
 - 两个列表都通过第二次校验调用与已存祖先链记忆去重；已作为 `handoff/<task>` 节点存在的交接单被丢弃。
 - 候选按会话缓存（`WeakMap`）；下一次 `agent/pre-step` 把一条 `rin-accumulate` 用户消息折叠进请求并清空缓存，因此候选恰好呈现一次。
