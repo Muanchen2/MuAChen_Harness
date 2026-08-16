@@ -65,10 +65,12 @@ export interface Config {
   maxBytes?: number
   /**
    * Automatic recall from turn 2 on: each request retrieves the top-N most
-   * relevant stored memories (by keyword search over the latest user
-   * message) and injects their summaries, so the agent reasons with relevant
-   * experience at hand like a human recalling it — without being asked. Ids
-   * already recalled in this session are not repeated. `0` disables recall.
+   * relevant stored memories (by keyword search over the recent execution
+   * context — the latest tool results and assistant replies first, then the
+   * user's latest message) and injects their summaries, so the agent reasons
+   * with relevant experience at hand like a human recalling it — without
+   * being asked. Ids already recalled in this session are not repeated. `0`
+   * disables recall.
    */
   recallTopN?: number
 }
@@ -177,6 +179,42 @@ function lastUserText(messages: readonly UserMessage[]): string {
   return ''
 }
 
+/**
+ * Recursively collect text from message content blocks. Tool results nest
+ * their payload under a `tool-result` block whose own `content` is a block
+ * array, so a naive top-level text scan would miss tool output entirely.
+ */
+function contentText(content: readonly { type: string; text?: unknown; content?: unknown }[]): string {
+  const parts: string[] = []
+  for (const block of content) {
+    if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+    if (block.type === 'tool-result' && Array.isArray(block.content)) {
+      parts.push(contentText(block.content as { type: string; text?: unknown; content?: unknown }[]))
+    }
+  }
+  return parts.join(' ')
+}
+
+/**
+ * The text of the session's most recent surface messages, newest first —
+ * user prompts, assistant replies, and tool results alike. Automatic recall
+ * should answer what the agent is doing right now (a failing tool result,
+ * the step it is about to take), not only the user's latest words, so the
+ * retrieval probes ride the execution context. Rin-injected messages are
+ * excluded: their own content would otherwise feed the queries back to
+ * themselves.
+ */
+function recentSurfaceText(session: Session, maxMessages: number): string {
+  const parts: string[] = []
+  for (const message of session.deriveMessages().slice(-maxMessages).reverse()) {
+    const kind = (message as { source?: { kind?: unknown } }).source?.kind
+    if (typeof kind === 'string' && kind.startsWith('rin-')) continue
+    const text = contentText(message.content)
+    if (text.trim() !== '') parts.push(text)
+  }
+  return parts.join(' ')
+}
+
 function sameRecallPayload(left: UserMessage, right: UserMessage): boolean {
   return isDeepStrictEqual(left.content, right.content)
     && isDeepStrictEqual(left.source, right.source)
@@ -211,7 +249,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     signal.throwIfAborted()
     const cwd = agent.session.header.cwd
     if (cwd === undefined) return undefined
-    const queries = recallQueries(lastUserText(messages))
+    // Execution context first (recent tool results and assistant replies, so
+    // a failing command's error text drives retrieval), the user's latest
+    // words second (the direct prompt remains the primary intent probe).
+    const queries = recallQueries(`${recentSurfaceText(agent.session, 3)} ${lastUserText(messages)}`)
     if (queries.length === 0) return undefined
     signal.throwIfAborted()
     const seen = recalledIds.get(agent.session) ?? new Set<string>()

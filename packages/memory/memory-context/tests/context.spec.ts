@@ -350,6 +350,50 @@ describe('the memory context injection', () => {
     expect(text).not.toContain('design/other')
   })
 
+  it('recalls from the recent tool result, not only the user prompt', async () => {
+    const root = tempRoot('recall-tool')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'bugfix/enoent', title: '修复 ENOENT', content: 'spawn 失败 ENOENT 找不到文件，store 目录缺失' })
+    await memories.remember('workspace', workspace, { id: 'design/other', title: '无关设计', content: '无关内容' })
+
+    const seed: SessionEvent[] = [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      {
+        type: 'user/message', seq: 1, time: 1, surfaceOp: 'append',
+        data: { id: 'u1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '开始处理' }] },
+      },
+      {
+        type: 'tool/result', seq: 2, time: 1, surfaceOp: 'append',
+        data: {
+          message: {
+            id: 't1', role: 'user', source: { kind: 'tool', name: 'pwsh', callId: 'c1' },
+            content: [{
+              type: 'tool-result',
+              content: [{ type: 'text', text: 'spawn 报错 ENOENT 找不到文件' }],
+              toolCallId: 'c1',
+            }],
+          },
+        },
+      },
+      { type: 'turn/end', seq: 3, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+    ] as unknown as SessionEvent[]
+    const agent = stubAgent(workspace, seed)
+    // The user prompt itself carries no probe; the failing tool result does.
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: '继续处理' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    const recalls = decision.kind === 'enter'
+      ? decision.messages.filter(message => message.source.kind === 'rin-memory-recall')
+      : []
+    expect(recalls).toHaveLength(1)
+    const text = blocksText(recalls[0]?.content)
+    expect(text).toContain('bugfix/enoent')
+    expect(text).not.toContain('design/other')
+  })
+
   it('does not repeat recalled memories in the same session', async () => {
     const root = tempRoot('recall-once')
     const workspace = join(root, 'ws')
