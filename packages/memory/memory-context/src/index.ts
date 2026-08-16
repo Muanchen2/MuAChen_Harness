@@ -19,7 +19,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { isDeepStrictEqual } from 'node:util'
 import { dirname, relative } from 'node:path'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type Message } from '@deepseek-ai/dsh-llm'
 import type { ChainContent } from '@deepseek-ai/dsh-memory'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -149,15 +149,27 @@ function renderBounded(sections: readonly RenderSection[], maxBytes: number): st
 const CATALOGUE_HINT = '需要详细内容时，用 memory read（scope 可选 workspace/chain/central）按 id 查询。'
 
 /**
- * Retrieval queries for automatic recall: up to two latin words (≥3 chars)
- * plus the longest CJK segment of the user's latest message (capped at 20
- * chars). No word segmentation exists for CJK, so the longest segment is the
- * cheapest useful probe.
+ * Latin words with no retrieval value that lead error output: without
+ * filtering, a failing tool result's first word (`syntaxerror`, `error`)
+ * would consume the latin query budget before the meaningful keyword
+ * (`enum`, `typescript`) appears.
+ */
+const QUERY_NOISE_WORDS = new Set(['error', 'syntaxerror', 'failed', 'failure', 'exception', 'undefined', 'aborted'])
+
+/**
+ * Retrieval queries for automatic recall: up to two latin words (≥3 chars,
+ * noise words filtered) plus the longest CJK segment of the input (capped at
+ * 20 chars). No word segmentation exists for CJK, so the longest segment is
+ * the cheapest useful probe.
  */
 function recallQueries(text: string): string[] {
   const queries: string[] = []
   const words = text.toLowerCase().match(/[a-z][a-z0-9_-]{2,}/g) ?? []
-  for (const word of words.slice(0, 2)) queries.push(word)
+  for (const word of words) {
+    if (QUERY_NOISE_WORDS.has(word)) continue
+    queries.push(word)
+    if (queries.length >= 2) break
+  }
   const segments = text.split(/[，。！？、；：\s]+/).filter(segment => segment.length > 0)
   if (segments.length > 0) {
     const longest = segments.reduce((a, b) => (b.length > a.length ? b : a))
@@ -196,23 +208,29 @@ function contentText(content: readonly { type: string; text?: unknown; content?:
 }
 
 /**
- * The text of the session's most recent surface messages, newest first —
- * user prompts, assistant replies, and tool results alike. Automatic recall
- * should answer what the agent is doing right now (a failing tool result,
- * the step it is about to take), not only the user's latest words, so the
- * retrieval probes ride the execution context. Rin-injected messages are
- * excluded: their own content would otherwise feed the queries back to
- * themselves.
+ * The text of the session's most recent surface messages — user prompts,
+ * assistant replies, and tool results alike. Automatic recall should answer
+ * what the agent is doing right now (a failing tool result, the step it is
+ * about to take), not only the user's latest words, so the retrieval probes
+ * ride the execution context. Tool results come FIRST (they are the
+ * execution context itself; an assistant's narration would otherwise crowd
+ * their error text out of the query budget), then the rest newest first.
+ * Rin-injected messages are excluded: their own content would otherwise feed
+ * the queries back to themselves.
  */
 function recentSurfaceText(session: Session, maxMessages: number): string {
-  const parts: string[] = []
-  for (const message of session.deriveMessages().slice(-maxMessages).reverse()) {
-    const kind = (message as { source?: { kind?: unknown } }).source?.kind
+  const tail = session.deriveMessages().slice(-maxMessages).reverse()
+  const kindOf = (message: Message): unknown => (message as { source?: { kind?: unknown } }).source?.kind
+  const toolTexts: string[] = []
+  const otherTexts: string[] = []
+  for (const message of tail) {
+    const kind = kindOf(message)
     if (typeof kind === 'string' && kind.startsWith('rin-')) continue
     const text = contentText(message.content)
-    if (text.trim() !== '') parts.push(text)
+    if (text.trim() === '') continue
+    ;(kind === 'tool' ? toolTexts : otherTexts).push(text)
   }
-  return parts.join(' ')
+  return [...toolTexts, ...otherTexts].join(' ')
 }
 
 function sameRecallPayload(left: UserMessage, right: UserMessage): boolean {

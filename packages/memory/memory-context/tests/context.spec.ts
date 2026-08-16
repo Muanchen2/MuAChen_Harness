@@ -394,6 +394,86 @@ describe('the memory context injection', () => {
     expect(text).not.toContain('design/other')
   })
 
+  it('prefers tool result keywords over earlier narration in recall queries', async () => {
+    const root = tempRoot('recall-tool-first')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'bugfix/alpha', title: 'Alpha', content: 'alpha 相关' })
+    await memories.remember('workspace', workspace, { id: 'bugfix/beta', title: 'Beta', content: 'beta 相关' })
+
+    const seed: SessionEvent[] = [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      {
+        type: 'user/message', seq: 1, time: 1, surfaceOp: 'append',
+        data: { id: 'u1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'alpha alpha 讨论' }] },
+      },
+      {
+        type: 'tool/result', seq: 2, time: 1, surfaceOp: 'append',
+        data: {
+          message: {
+            id: 't1', role: 'user', source: { kind: 'tool', name: 'pwsh', callId: 'c1' },
+            content: [{
+              type: 'tool-result',
+              content: [{ type: 'text', text: 'beta 报错' }],
+              toolCallId: 'c1',
+            }],
+          },
+        },
+      },
+      { type: 'turn/end', seq: 3, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+    ] as unknown as SessionEvent[]
+    const agent = stubAgent(workspace, seed)
+    // The tool result's keyword (`beta`) must win the query budget over the
+    // user narration's (`alpha`) — the tool result IS the execution context.
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: '继续处理' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    const recalls = decision.kind === 'enter'
+      ? decision.messages.filter(message => message.source.kind === 'rin-memory-recall')
+      : []
+    expect(recalls).toHaveLength(1)
+    expect(blocksText(recalls[0]?.content)).toContain('bugfix/beta')
+  })
+
+  it('filters error-noise words out of recall queries', async () => {
+    const root = tempRoot('recall-noise')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, { id: 'bugfix/alpha', title: 'Alpha', content: 'alpha 相关' })
+
+    const seed: SessionEvent[] = [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      {
+        type: 'tool/result', seq: 1, time: 1, surfaceOp: 'append',
+        data: {
+          message: {
+            id: 't1', role: 'user', source: { kind: 'tool', name: 'pwsh', callId: 'c1' },
+            content: [{
+              type: 'tool-result',
+              content: [{ type: 'text', text: 'SyntaxError: alpha is not supported' }],
+              toolCallId: 'c1',
+            }],
+          },
+        },
+      },
+      { type: 'turn/end', seq: 2, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+    ] as unknown as SessionEvent[]
+    const agent = stubAgent(workspace, seed)
+    const userMsg = createUserMessage({
+      content: [{ type: 'text', text: '继续' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+    const decision = await stepDecision(ctx, agent, [userMsg], 1, 2)
+    const recalls = decision.kind === 'enter'
+      ? decision.messages.filter(message => message.source.kind === 'rin-memory-recall')
+      : []
+    expect(recalls).toHaveLength(1)
+    // `syntaxerror` is noise; `alpha` (the real keyword) must carry the query.
+    expect(blocksText(recalls[0]?.content)).toContain('bugfix/alpha')
+  })
+
   it('does not repeat recalled memories in the same session', async () => {
     const root = tempRoot('recall-once')
     const workspace = join(root, 'ws')
