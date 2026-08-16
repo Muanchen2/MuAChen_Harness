@@ -199,8 +199,9 @@ export class MemoryService extends Service {
       .sort((left, right) => right[1].count - left[1].count)
       .slice(0, SEARCH_MAX_HITS)
     const hits: SearchHit[] = []
+    const fs = await import('node:fs/promises')
     for (const [id, entry] of ranked) {
-      const content = await this.git.readFile(dir, nodePath(id))
+      const content = await fs.readFile(join(dir, nodePath(id)), 'utf8').catch(() => undefined)
       hits.push({
         id,
         title: content === undefined ? entry.title : (firstHeading(content) ?? entry.title),
@@ -389,13 +390,27 @@ export class MemoryService extends Service {
     return this.git.hasCommits(dir)
   }
 
-  /** Read every node of one store. */
+  /**
+   * Read every node of one store. Contents come from the working tree
+   * (same source as {@link listMarkdownIds}) — one filesystem read per node
+   * instead of one `git show` spawn, so a store with hundreds of memories
+   * loads in one fast pass instead of hundreds of git processes. The working
+   * tree equals HEAD for ordinary flows because every write commits; the
+   * divergence window is manual uncommitted edits, which the catalogue reads
+   * as their current text.
+   */
   private async loadStoreNodes(store: string, scope: MemoryScope): Promise<MemoryNode[]> {
+    const ids = await this.listMarkdownIds(store)
+    if (ids.length === 0) return []
+    const fs = await import('node:fs/promises')
+    const contents = await Promise.all(
+      ids.map(id => fs.readFile(join(store, nodePath(id)), 'utf8').catch(() => undefined)),
+    )
     const nodes: MemoryNode[] = []
-    for (const id of await this.listMarkdownIds(store)) {
-      const content = await this.git.readFile(store, nodePath(id))
+    for (let i = 0; i < ids.length; i++) {
+      const content = contents[i]
       if (content === undefined) continue
-      nodes.push({ id, title: firstHeading(content) ?? id, content: stripHeading(content), scope, branch: 'default' })
+      nodes.push({ id: ids[i], title: firstHeading(content) ?? ids[i], content: stripHeading(content), scope, branch: 'default' })
     }
     return nodes
   }
