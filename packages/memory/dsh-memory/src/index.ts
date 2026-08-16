@@ -408,9 +408,10 @@ export class MemoryService extends Service {
     )
     const nodes: MemoryNode[] = []
     for (let i = 0; i < ids.length; i++) {
+      const id = ids[i]
       const content = contents[i]
-      if (content === undefined) continue
-      nodes.push({ id: ids[i], title: firstHeading(content) ?? ids[i], content: stripHeading(content), scope, branch: 'default' })
+      if (id === undefined || content === undefined) continue
+      nodes.push({ id, title: firstHeading(content) ?? id, content: stripHeading(content), scope, branch: 'default' })
     }
     return nodes
   }
