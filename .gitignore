@@ -39,6 +39,7 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 .dsh-memory/
+.dsh-assets/
 dsh-web.log
 
 # Desktop shell artifacts
