@@ -41,6 +41,7 @@ worktrees/
 .typert-*/
 .dsh-memory/
 .dsh-assets/
+.dsh-skills/
 dsh-web.log
 
 # Desktop shell artifacts
