@@ -57,6 +57,7 @@ import * as ToolSchedule from '@deepseek-ai/dsh-schedule'
 import Lsp from '@deepseek-ai/dsh-lsp'
 import * as ToolLsp from '@deepseek-ai/dsh-tool-lsp'
 import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
+import * as ToolSkillAdmin from '@deepseek-ai/dsh-skill-admin'
 import * as ToolSessionQuery from '@deepseek-ai/dsh-tool-session-query'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
 import * as ToolTodo from '@deepseek-ai/dsh-tool-todo'
@@ -422,6 +423,20 @@ const TOOL_PACKAGES: ToolPackage[] = [
       })
       await ctx.plugin(ToolSkill)
     },
+  },
+  {
+    pkg: '@deepseek-ai/dsh-skill-admin',
+    dir: 'skill-admin',
+    source: 'packages/skill/skill-admin/src/index.ts',
+    requires: ['ctx.tools', 'ctx.skills', 'ctx.systemPrompt', 'ctx.subprocess'],
+    writes: ['tool/call', 'tool/result', 'git commits in the skill store'],
+    async mount(ctx) {
+      await ctx.plugin(LocalSubprocessRuntime)
+      await ctx.plugin(SkillRegistry)
+      await ctx.plugin(ToolSkillAdmin)
+    },
+    note:
+      'The skill-admin tool renders the git-backed skill store operations; schema harvest mounts the local subprocess runtime so the service constructor resolves without touching a real store.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-memory',

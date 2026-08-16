@@ -841,7 +841,9 @@ async function listSkillRootEntries(root: SkillRoot, ctx: Context): Promise<Skil
 
 async function listSkillRootEntriesFromFileSystem(root: SkillRoot, fs: FileSystem): Promise<SkillRootEntry[]> {
   try {
-    return (await fsListDir(fs, root.path)).map(entryFromFs)
+    return (await fsListDir(fs, root.path))
+      .filter(entry => !isInternalSkillRootEntry(entry.name))
+      .map(entryFromFs)
   } catch (error) {
     if (isAbsentSkillPathError(error)) return []
     throw error
@@ -857,6 +859,15 @@ function entryFromFs(entry: FsDirEntry): SkillRootEntry {
   return { name: entry.name, type: entry.type, path: entry.target.displayPath }
 }
 
+/**
+ * Whether a root-level entry is internal machinery rather than a skill.
+ * `.git` houses the skill-root repository, and underscore-prefixed names
+ * (such as `_archived/`) are the admin-layer's internal convention.
+ */
+function isInternalSkillRootEntry(name: string): boolean {
+  return name === '.git' || name.startsWith('_')
+}
+
 async function listSkillRootEntriesFromNode(root: SkillRoot, ctx: Context): Promise<SkillRootEntry[]> {
   let entries
   try {
@@ -870,6 +881,7 @@ async function listSkillRootEntriesFromNode(root: SkillRoot, ctx: Context): Prom
 
   const result: SkillRootEntry[] = []
   for (const entry of entries) {
+    if (isInternalSkillRootEntry(entry.name)) continue
     const path = join(root.path, entry.name)
     const type = await nodeEntryKind(path, entry, ctx)
     result.push({ name: entry.name, type: type ?? 'other', path })

@@ -205,6 +205,24 @@ describe('FileSystemSkillProvider', () => {
     expect((await ctx.skills.list({ cwd: noGit })).map(skill => skill.name)).toContain('fallback-root')
   })
 
+  it('ignores .git and underscore-prefixed internal root entries', async () => {
+    const home = await tempDir('skill-internal')
+    const root = join(home, '.dsh/skills')
+    await writeSkill(root, 'visible', 'Visible skill')
+    await mkdir(join(root, '.git'), { recursive: true })
+    await mkdir(join(root, '.git', 'objects'), { recursive: true })
+    await writeFile(join(root, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    await writeSkill(join(root, '_archived'), 'old-skill', 'Archived skill')
+    await writeFile(join(root, '_draft.md'), '---\nname: draft-skill\ndescription: draft\n---\n\nDraft.\n')
+
+    const ctx = await setupLocal(home)
+    const listed = await ctx.skills.list({ cwd: home })
+
+    expect(listed.map(skill => skill.name)).toEqual(['visible'])
+    expect(listed.find(skill => skill.name === 'old-skill')).toBeUndefined()
+    expect(listed.find(skill => skill.name === 'draft-skill')).toBeUndefined()
+  })
+
   it('discovers only the Rin ancestor chain and keeps the nearest root first', async () => {
     const home = await tempDir('skill-rin-home')
     const workspace = await tempDir('skill-rin-workspace')

@@ -31,6 +31,7 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-lsp` | `lsp` | `ctx.tools`, `ctx.lsp`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | The lsp tool keeps provider selection and language-server subprocesses behind ctx.lsp, so its model-visible schema stays stable across providers. Requires a registered provider (e.g. `@deepseek-ai/dsh-lsp-stdio`) at runtime; without one, a query returns the structured `LSP_UNAVAILABLE` error rather than changing the schema. |
 | `@deepseek-ai/dsh-tool-ralph` | `ralph` | `ctx.tools`, `ctx.workflowEngine`, `ctx.subagents`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents every fresh round)` | `tool/call`, `tool/result`, `workflow and child session events during execution` | - | A fixed foreground workflow starts one fresh structured child per round; the model selects only the immutable objective and an optional round cap. |
 | `@deepseek-ai/dsh-tool-skill` | `skill` | `ctx.tools`, `ctx.agents`, `ctx.skills` | `tool/call`, `tool/result`, `user/message replacement catalogs via agent.inject()` | - | - |
+| `@deepseek-ai/dsh-skill-admin` | `skill-admin` | `ctx.tools`, `ctx.skills`, `ctx.systemPrompt`, `ctx.subprocess` | `tool/call`, `tool/result`, `git commits in the skill store` | - | The skill-admin tool renders the git-backed skill store operations; schema harvest mounts the local subprocess runtime so the service constructor resolves without touching a real store. |
 | `@deepseek-ai/dsh-tool-memory` | `memory` | `ctx.tools`, `ctx.memories`, `ctx.systemPrompt` | `tool/call`, `tool/result`, `git commits in the memory store` | - | The memory tool renders the Rin git-backed store operations; schema harvest mounts the local subprocess runtime so the service constructor resolves without touching a real store. |
 | `@deepseek-ai/dsh-tool-session-query` | `session_event_read`, `session_event_search`, `session_event_trace`, `session_search`, `session_trace` | `ctx.tools`, `ctx.systemPrompt`, `ctx.sessionQuery`, `a calling Agent for workspace authority` | `tool/call`, `tool/result` | - | The five read-only tools hide provider cursors and authorize every result from the immutable calling agent session. The package is opt-in; compositions that need enforced deadlines or bounded inline output also mount the generic timeout or spill policies. |
 | `@deepseek-ai/dsh-tool-subagent` | `subagent` | `ctx.tools`, `ctx.subagents`, `ctx.systemPrompt` | `tool/call`, `tool/result`, `child session events through the chosen provider` | `subagent`, `subagent_fork` | The registered tool name is the load-time `toolName` config (default `subagent`); the schema above is that default. The shipped compositions load this package once per subagent backend, so the model additionally sees `subagent_fork` bound to the fork backend. Each instance's description, `run_in_background` parameter, and system-prompt policy follow its own `backgroundMode` and `enableRunInBackground`, so the two shipped schemas are not identical: `subagent` is `continuable` and defaults omitted calls to background with automatic settlement delivery, while `subagent_fork` stays `one-shot` and defaults them to foreground — see `packages/bundle/base/cordis.patch.yml` and `examples/acp-agent/cordis.yml`. |
@@ -1233,6 +1234,83 @@ Load the full instructions for an available skill. Call this with the exact skil
 ```
 
 Source: [`packages/skill/tool-skill/src/index.ts`](../packages/skill/tool-skill/src/index.ts)
+
+<a id="deepseek-aidsh-skill-admin"></a>
+
+## `@deepseek-ai/dsh-skill-admin`
+
+### `skill-admin`
+
+Manage the git-backed skill stores (write/maintenance side, distinct from the read-only skill tool): create, update, archive, remove, list, history, revert, commit, and promote skills.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "create",
+        "update",
+        "archive",
+        "remove",
+        "list",
+        "history",
+        "revert",
+        "commit",
+        "promote"
+      ]
+    },
+    "target": {
+      "type": "string",
+      "description": "Skill layer to operate on: user (~/.dsh/skills) or workspace (nearest .dsh-skills of the session cwd)."
+    },
+    "name": {
+      "type": "string",
+      "description": "Kebab-case skill name (required by every action except list/commit)."
+    },
+    "description": {
+      "type": "string",
+      "description": "Required non-empty description for create/promote; optional field update for update."
+    },
+    "whenToUse": {
+      "type": "string",
+      "description": "Optional routing guidance for create/update/promote."
+    },
+    "script": {
+      "type": "string",
+      "description": "Optional executable entry name for create/update (script skill)."
+    },
+    "runtime": {
+      "type": "string",
+      "description": "Optional runtime for the script skill (node, python, pwsh, ...)."
+    },
+    "content": {
+      "type": "string",
+      "description": "SKILL.md body: required for create/promote, replaces the body for update."
+    },
+    "revision": {
+      "type": "string",
+      "description": "Git revision to restore for revert (take it from history)."
+    },
+    "source": {
+      "type": "string",
+      "description": "Source script path (absolute or cwd-relative) for promote."
+    },
+    "message": {
+      "type": "string",
+      "description": "Optional one-line commit message; a default is generated per action."
+    }
+  },
+  "required": [
+    "action"
+  ]
+}
+```
+
+Source: [`packages/skill/skill-admin/src/index.ts`](../packages/skill/skill-admin/src/index.ts)
+
+The skill-admin tool renders the git-backed skill store operations; schema harvest mounts the local subprocess runtime so the service constructor resolves without touching a real store.
 
 <a id="deepseek-aidsh-tool-memory"></a>
 
