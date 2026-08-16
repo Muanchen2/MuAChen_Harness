@@ -132,6 +132,35 @@ describe('the memory context injection', () => {
     expect(injected?.text).toContain('memory read')
   })
 
+  it('injects the catalogue once across multiple turn-1 steps', async () => {
+    const root = tempRoot('multi-step')
+    const workspace = join(root, 'ws')
+    const { ctx, memories } = await liveContext(join(root, 'central'))
+    await memories.remember('workspace', workspace, {
+      id: 'alpha', title: 'Alpha', content: 'first experience',
+    })
+    const agent = stubAgent(workspace)
+    const prompt = createUserMessage({
+      content: [{ type: 'text', text: '开始干活' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })
+
+    // Step 1 of turn 1 injects the catalogue...
+    const first = await stepDecision(ctx, agent, [prompt], 1, 1)
+    const firstMemory = first.kind === 'enter' ? first.messages.filter(isRinMemory) : []
+    expect(firstMemory).toHaveLength(1)
+    // ...and the loop persists it to the surface (the real agent-loop appends
+    // the entered batch before the next step's pre-step).
+    for (const message of firstMemory) {
+      agent.session.append('user/message', message, { surfaceOp: 'append' })
+    }
+
+    // Step 2 of the same long turn must NOT re-inject the same payload.
+    const second = await stepDecision(ctx, agent, [prompt], 2, 1)
+    const secondMemory = second.kind === 'enter' ? second.messages.filter(isRinMemory) : []
+    expect(secondMemory).toHaveLength(0)
+  })
+
   it('includes the central store as the final chain level', async () => {
     const root = tempRoot('central-included')
     const workspace = join(root, 'ws')

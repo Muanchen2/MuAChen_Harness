@@ -238,6 +238,21 @@ function sameRecallPayload(left: UserMessage, right: UserMessage): boolean {
     && isDeepStrictEqual(left.source, right.source)
 }
 
+/**
+ * Whether the session surface already carries a user message with this exact
+ * payload. `agent/pre-step` only offers the newly claimed batch, so a payload
+ * injected by an earlier step of the same turn (or an earlier turn) lives in
+ * the surface, not in `decision.messages` — without this check a long turn 1
+ * (a single prompt that drives dozens of steps) would re-inject the catalogue
+ * on every step.
+ */
+function alreadyOnSurface(agent: Agent, payload: UserMessage): boolean {
+  return agent.session.surface.nodes.some((seq) => {
+    const event = agent.session.events[seq]
+    return event?.type === 'user/message' && sameContextPayload(event.data, payload)
+  })
+}
+
 /** Register the memory context injection. */
 export function apply(ctx: Context, config: Config = {}): void {
   const maxBytes = config.maxBytes ?? 16 * 1024
@@ -439,7 +454,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (recallTopN > 0 && decision.kind === 'enter' && decision.messages.length > 0) {
         const recall = await composeRecall(agent, messages, turn, signal)
         signal.throwIfAborted()
-        if (recall !== undefined && !decision.messages.some(message => sameRecallPayload(message, recall))) {
+        if (recall !== undefined
+          && !decision.messages.some(message => sameRecallPayload(message, recall))
+          && !alreadyOnSurface(agent, recall)) {
           const lastClaimedIndex = decision.messages.findLastIndex(message => messages.includes(message))
           const entered = decision.messages.toSpliced(lastClaimedIndex + 1, 0, recall)
           return { kind: 'enter', messages: entered }
@@ -458,9 +475,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       return decision
     }
     // A proceeding step settles the pending context: it either enters below as
-    // `desired`, or its payload is already covered by the batch.
+    // `desired`, or its payload is already covered by the batch or the surface
+    // (an earlier step of this long turn injected it already).
     for (const message of pending) agent.inbox.remove(message.id)
-    if (desired === undefined || decision.messages.some(message => sameContextPayload(message, desired))) {
+    if (desired === undefined
+      || decision.messages.some(message => sameContextPayload(message, desired))
+      || alreadyOnSurface(agent, desired)) {
       return decision
     }
     // Fold the context right after the claimed batch, so the direct prompt
