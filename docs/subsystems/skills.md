@@ -74,7 +74,18 @@ The shipped local provider scans roots in rank order:
 | 500 | `user-agents` | `<agentsHome>/skills` |
 | 600 | `bundled` | `Config.bundledSkillDir` when configured |
 
+With `rootMode: 'rin'`, the provider adds the hierarchical roots before the standard project compatibility roots:
+
+| Rank | Source | Root |
+|---|---|---|
+| -1, -2, ... | `rin-workspace` | `<cwd>/.dsh-skills` and each ancestor `.dsh-skills`, nearest first |
+| 100 | `project-dsh` | `<projectRoot>/.dsh/skills` |
+| 200 | `project-agents` | `<projectRoot>/.agents/skills` |
+| 400 | `rin-user` | `<dshHome>/skills` |
+
 The project root is the nearest ancestor containing `.git`; without one, the current cwd is used. When `ctx.fs` is available, the git-root walk probes `.git` through the filesystem service so remote or sandboxed workspaces do not fall back to the host filesystem boundary. The user DSH root skips its `.system` child. The local provider does not synthesize built-in system skills; deployments supply packaged skills through configured bundled roots or dedicated providers.
+
+`rootMode: 'rin'` adds a directory chain before the project compatibility roots: `<cwd>/.dsh-skills`, each ancestor's `.dsh-skills` in nearest-first order, and `<dshHome>/skills` as the general layer. The chain uses negative ranks so a nearer directory always wins duplicate names; project `.dsh/skills` and `.agents/skills` remain low-priority compatibility roots, while the user-level `.agents/skills` root is excluded. Configured custom and bundled roots remain explicit additions.
 
 `dsh-skill-badge` registers one immutable `bundled` candidate at `BUNDLED_SKILL_RANK` and exposes its packaged asset directory through `resourceBase`. The shipped CLI declares the plugin disabled, so enabling its composition row is an explicit opt-in.
 
@@ -86,7 +97,7 @@ Skill names are kebab-case (`^[a-z0-9]+(?:-[a-z0-9]+)*$`). The local provider ac
 
 ```ts type-equiv
 /** Origin bucket for a skill contribution. The value is prompt-visible metadata, not precedence by itself. */
-type SkillSource = 'project-dsh' | 'project-agents' | 'runtime' | 'user-dsh' | 'user-agents' | 'custom' | 'bundled' | (string & {})
+type SkillSource = 'project-dsh' | 'project-agents' | 'rin-workspace' | 'rin-user' | 'runtime' | 'user-dsh' | 'user-agents' | 'custom' | 'bundled' | (string & {})
 ```
 
 ## Summaries, candidates, and complete definitions

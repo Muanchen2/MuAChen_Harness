@@ -15,10 +15,11 @@
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `providerName` | `filesystem` | 在 `ctx.skills` 上注册该提供方时使用的唯一名称。 |
+| `rootMode` | `standard` | `standard` 扫描下方的项目根和用户根；`rin` 扫描每个祖先 `<directory>/.dsh-skills` 根以及 DSH 用户根。 |
 | `includeDefaultRoots` | `true` | 在 `customSkillDirs` 周围包含项目根和用户根；设为 false 时仅使用隔离的自定义根。 |
 | `dshHome` | `$DSH_HOME` 或 `~/.dsh` | 由 [`@deepseek-ai/dsh-home-paths`](../../util/home-paths/README.md) 解析的 DeepSeek Harness 配置根目录；扫描该目录下的 `skills`。 |
 | `agentsHome` | `$DSH_AGENTS_HOME` 或 `~/.agents` | 为兼容 skill 扫描的共享 agent（智能体）配置根目录。 |
-| `customSkillDirs` | `[]` | 在项目根目录之后、用户根目录之前扫描的其他本地 skill 根目录。 |
+| `customSkillDirs` | `[]` | 在工作区和项目根目录之后、用户根目录之前扫描的其他本地 skill 根目录。 |
 | `watch` | `true` | 监视宿主本地根，并在目录成员或 frontmatter 可能发生变化时使本地提供方失效。 |
 | `watchUsePolling` | `false` | 对现有 skill 根使用 Chokidar 轮询，而不是原生事件。 |
 | `watchStabilityThresholdMs` | `200` | Chokidar `add` 和 `change` 事件的稳定写入窗口。 |
@@ -38,7 +39,18 @@
 | 400 | `user-dsh` | `<dshHome>/skills` |
 | 500 | `user-agents` | `<agentsHome>/skills` |
 
+使用 `rootMode: 'rin'` 时，提供方会在项目兼容根之前加入以下有序链：
+
+| Rank | 来源 | 根目录 |
+|---|---|---|
+| -1、-2、... | `rin-workspace` | `<cwd>/.dsh-skills` 和每个祖先目录 `.dsh-skills`，从最近到最远 |
+| 100 | `project-dsh` | `<projectRoot>/.dsh/skills` |
+| 200 | `project-agents` | `<projectRoot>/.agents/skills` |
+| 400 | `rin-user` | `<dshHome>/skills` |
+
 项目根目录是包含 `.git` 的最近祖先目录；如果不存在，则使用当前 cwd。用户 DSH 根目录会跳过其 `.system` 子目录，因此归系统所有的目录不会被当作普通用户 skill。`includeDefaultRoots: false` 会省略项目根、用户根以及 `$DSH_BUNDLED_SKILL_DIR` 环境默认值，同时保留显式配置的自定义根与 bundled 根，因此可以挂载多个只看到自身根的唯一命名隔离提供方。该提供方提供项目和用户 skill；其他提供方可提供内置系统 skill。
+
+`rootMode: 'rin'` 是独立的层级布局。它扫描 `<cwd>/.dsh-skills`，然后按从近到远扫描每个祖先目录的 `.dsh-skills`，最后扫描 `<dshHome>/skills`；较近的根目录优先覆盖同名 skill。项目级 `.dsh/skills` 和 `.agents/skills` 作为低优先级兼容根保留，用于仓库本地指令；用户级 `<agentsHome>/skills` 被排除，因此全局 skill 不会进入 Rin 会话。自定义根和 bundled 根仍作为目录链之后的显式附加项。
 
 当 `ctx.fs` 可用时，发现通过 `ctx.fs.listDir` 列出根，通过 `ctx.fs.readText` 读取 skill 文件，并通过文件系统服务探测 `.git`。完整 skill 加载会将查找中止信号转发给文件系统元数据和内容读取。如果没有文件系统服务，提供方回退到可中止的 Node 文件系统 I/O，使最小本地上下文仍能加载 skill。已确认缺失的路径属于有效空状态；遇到格式错误或非文本条目时，提供方会发出警告并跳过；意外的发现或读取失败会使注册表快照不完整，系统不会因此用看似发生删除的结果替换上一份可用模型目录。
 
