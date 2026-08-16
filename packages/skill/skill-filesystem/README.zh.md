@@ -64,7 +64,7 @@
 
 ## skill 格式
 
-skill 可以是单层目录 bundle（`<name>/SKILL.md`），也可以是平铺 Markdown 文件（`<name>.md`）。刻意不支持发现嵌套的 `**/SKILL.md`。Frontmatter 使用 `yaml` 包解析为开放的 YAML 对象；该提供方解析必填的 `name` 和 `description`，以及可选的 `whenToUse`、`metadata`、`script`、`runtime`、`disable-model-invocation` 和 `user-invocable`。名称必须使用 kebab-case。
+skill 可以是单层目录 bundle（`<name>/SKILL.md`），也可以是平铺 Markdown 文件（`<name>.md`）。刻意不支持发现嵌套的 `**/SKILL.md`。Frontmatter 使用 `yaml` 包解析为开放的 YAML 对象；该提供方解析必填的 `name` 和 `description`，以及可选的 `whenToUse`、`metadata`、`script`、`runtime`、`status`、`disable-model-invocation` 和 `user-invocable`。`status` 标记提升状态（`candidate` 表示待主人审核、尚未提升到用户级），并随 metadata 通道以 `metadata.status` 暴露。名称必须使用 kebab-case。
 
 **脚本 skill** 把指令正文与可执行入口配对：`script` 命名相对于 skill 目录的入口（如 `scripts/run.ts`），`runtime` 声明运行方式（`node`、`python`、`pwsh` 等）。两者与显式 `metadata` 一起走 metadata 通道，因此 `ctx.skills.get()` 以 `metadata.script` / `metadata.runtime` 暴露，`skill` 工具也作为结构化输出字段返回——agent 把脚本相对 skill 的 `resourceBase` 目录解析后，用声明的 runtime 通过其 shell 工具执行。
 

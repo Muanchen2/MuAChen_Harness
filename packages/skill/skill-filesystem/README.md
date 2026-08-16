@@ -64,7 +64,7 @@ The first-party filesystem `write` and `edit` tools also synchronously invalidat
 
 ## Skill Format
 
-Skills can be single-level directory bundles (`<name>/SKILL.md`) or flat Markdown files (`<name>.md`). Nested `**/SKILL.md` discovery is deliberately excluded. Frontmatter is parsed as an open YAML object with the `yaml` package; this provider interprets required `name` and `description`, plus optional `whenToUse`, `metadata`, `script`, `runtime`, `disable-model-invocation`, and `user-invocable`. Names must be kebab-case.
+Skills can be single-level directory bundles (`<name>/SKILL.md`) or flat Markdown files (`<name>.md`). Nested `**/SKILL.md` discovery is deliberately excluded. Frontmatter is parsed as an open YAML object with the `yaml` package; this provider interprets required `name` and `description`, plus optional `whenToUse`, `metadata`, `script`, `runtime`, `status`, `disable-model-invocation`, and `user-invocable`. `status` marks the promotion state (`candidate` awaiting the owner's review before the skill moves to the user level) and rides the metadata channel as `metadata.status`. Names must be kebab-case.
 
 A **script skill** pairs the instruction body with an executable entry: `script` names the entry relative to the skill directory (e.g. `scripts/run.ts`) and `runtime` declares how to run it (`node`, `python`, `pwsh`, ...). Both ride the metadata channel alongside any explicit `metadata`, so `ctx.skills.get()` exposes them as `metadata.script` / `metadata.runtime` and the `skill` tool returns them as structured output fields — the agent resolves the script against the skill's `resourceBase` directory and executes it with the declared runtime through its shell tooling.
 

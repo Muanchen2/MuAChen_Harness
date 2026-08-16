@@ -373,6 +373,27 @@ describe('FileSystemSkillProvider', () => {
     })
   })
 
+  it('carries the status frontmatter through the metadata channel', async () => {
+    const home = await tempDir('skill-status')
+    const root = join(home, '.dsh/skills')
+    await writeSkill(root, 'candidate-skill', 'candidate description', 'Awaiting review.')
+    await writeFile(join(root, 'candidate-skill/SKILL.md'), [
+      '---',
+      'name: candidate-skill',
+      'description: candidate description',
+      'status: candidate',
+      '---',
+      '',
+      'Awaiting review.',
+    ].join('\n'))
+
+    const ctx = await setupLocal(home)
+    expect(await ctx.skills.get('candidate-skill')).toMatchObject({
+      content: 'Awaiting review.',
+      metadata: { status: 'candidate' },
+    })
+  })
+
   it('accepts the documented boolean spellings for invocation frontmatter', async () => {
     const home = await tempDir('skill-invocation-booleans')
     const root = join(home, '.dsh/skills')

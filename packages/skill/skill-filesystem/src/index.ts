@@ -1162,12 +1162,25 @@ function scriptMetadata(data: Record<string, unknown>): { metadata?: Record<stri
   return { metadata: merged }
 }
 
-/** The combined provider metadata: explicit `metadata` plus `script`/`runtime`. */
+/**
+ * Frontmatter `status` (the promotion state: `candidate` awaiting the owner's
+ * review, `active` after approval — absent for ordinary skills) rides the
+ * metadata channel so the catalog and the model-facing tool can surface
+ * skills awaiting promotion to the user level.
+ */
+function statusMetadata(data: Record<string, unknown>): { metadata?: Record<string, unknown> } {
+  const status = stringField(data, 'status')
+  if (status === undefined) return {}
+  return { metadata: { status } }
+}
+
+/** The combined provider metadata: explicit `metadata` plus `script`/`runtime`/`status`. */
 function combinedMetadata(data: Record<string, unknown>): { metadata?: Record<string, unknown> } {
   const explicit = optionalMetadata(data).metadata
   const scripted = scriptMetadata(data).metadata
-  if (explicit === undefined && scripted === undefined) return {}
-  return { metadata: { ...explicit, ...scripted } }
+  const status = statusMetadata(data).metadata
+  if (explicit === undefined && scripted === undefined && status === undefined) return {}
+  return { metadata: { ...explicit, ...scripted, ...status } }
 }
 
 function errorMessage(error: unknown): string {
