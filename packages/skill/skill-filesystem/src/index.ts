@@ -916,7 +916,7 @@ async function parseSkillFile(path: string, ctx: Context, signal?: AbortSignal, 
     description,
     ...optionalString(parsed.data, 'whenToUse'),
     invocation,
-    ...optionalMetadata(parsed.data),
+    ...combinedMetadata(parsed.data),
     content: parsed.body.trim(),
   }
 }
@@ -1132,6 +1132,30 @@ function optionalMetadata(data: Record<string, unknown>): { metadata?: Record<st
     return { metadata: value as Record<string, unknown> }
   }
   return {}
+}
+
+/**
+ * Frontmatter `script`/`runtime` fields (the executable entry of a script
+ * skill and its runtime) ride the metadata channel: they are top-level for
+ * authors but reach consumers through the same `metadata` field as any other
+ * provider-specific frontmatter.
+ */
+function scriptMetadata(data: Record<string, unknown>): { metadata?: Record<string, unknown> } {
+  const script = stringField(data, 'script')
+  const runtime = stringField(data, 'runtime')
+  if (script === undefined && runtime === undefined) return {}
+  const merged: Record<string, unknown> = {}
+  if (script !== undefined) merged.script = script
+  if (runtime !== undefined) merged.runtime = runtime
+  return { metadata: merged }
+}
+
+/** The combined provider metadata: explicit `metadata` plus `script`/`runtime`. */
+function combinedMetadata(data: Record<string, unknown>): { metadata?: Record<string, unknown> } {
+  const explicit = optionalMetadata(data).metadata
+  const scripted = scriptMetadata(data).metadata
+  if (explicit === undefined && scripted === undefined) return {}
+  return { metadata: { ...explicit, ...scripted } }
 }
 
 function errorMessage(error: unknown): string {

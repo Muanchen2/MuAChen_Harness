@@ -119,6 +119,8 @@ export function apply(ctx: Context, config: Config = {}): void {
               },
             ],
           },
+          script: { type: 'string', description: 'Executable entry of a script skill, relative to the resource base.' },
+          runtime: { type: 'string', description: 'Runtime for the script skill (node, python, pwsh, ...).' },
           content: { type: 'string', required: true },
         },
       },
@@ -145,12 +147,17 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (!isModelInvocable(skill)) {
         throw new Error(`skill "${args.name}" is not available for model invocation`)
       }
+      const metadata = skill.metadata
+      const script = typeof metadata?.script === 'string' && metadata.script.length > 0 ? metadata.script : undefined
+      const runtime = typeof metadata?.runtime === 'string' && metadata.runtime.length > 0 ? metadata.runtime : undefined
       return {
         name: skill.name,
         provider: skill.provider,
         ...skill.resourceBase !== undefined ? {
           resourceBase: { ...skill.resourceBase },
         } : {},
+        ...script !== undefined ? { script } : {},
+        ...runtime !== undefined ? { runtime } : {},
         content: skill.content,
       }
     },

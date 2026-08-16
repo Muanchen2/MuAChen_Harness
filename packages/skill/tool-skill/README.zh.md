@@ -22,7 +22,7 @@
 |---|---|---|
 | `name` | string（必填） | 可用 skill 列表中精确的 kebab-case skill 名称。 |
 
-执行使用调用 agent 的 `session.header.cwd`，使结果随工作区变化的提供方能够解析出胜出的 skill。成功调用返回规范形式的 `{ name, provider, resourceBase?, content }`，其中不包含目录排名和提供方内部机制；其 Native 渲染器会生成一个文本结果，其中包含 `<skill_content name="...">`、`<skill_resources>` 和 `<skill_instructions>`。
+执行使用调用 agent 的 `session.header.cwd`，使结果随工作区变化的提供方能够解析出胜出的 skill。成功调用返回规范形式的 `{ name, provider, resourceBase?, script?, runtime?, content }`——`script`/`runtime` 仅脚本 skill 有（相对于 `resourceBase` 的可执行入口及其 runtime）——其中不包含目录排名和提供方内部机制；其 Native 渲染器会生成一个文本结果，其中包含 `<skill_content name="...">`、`<skill_resources>` 和 `<skill_instructions>`。
 
 资源指引只会根据 `resourceBase` 解析指令显式引用的路径或 URL；脚本、参考资料和资源文件按需加载，结果不会列举 skill 目录。本地提供方可以提供目录，而远程或嵌入式提供方可以提供 URL 或不透明加载指引。
 

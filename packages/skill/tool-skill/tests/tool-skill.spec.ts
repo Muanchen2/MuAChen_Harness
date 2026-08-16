@@ -798,6 +798,43 @@ describe('dsh-tool-skill', () => {
     expect(block.text).not.toContain('# Skill:')
   })
 
+  it('returns script and runtime metadata for a script skill', async () => {
+    const home = await tempDir('tool-script')
+    const project = await tempDir('tool-script-project')
+    await mkdir(join(project, '.git'), { recursive: true })
+    await writeSkill(join(project, '.dsh/skills'), 'script-skill', 'Script skill', 'Run the script.')
+    await writeFile(join(project, '.dsh/skills/script-skill/SKILL.md'), [
+      '---',
+      'name: script-skill',
+      'description: Script skill',
+      'script: scripts/run.ts',
+      'runtime: node',
+      '---',
+      '',
+      'Run the script.',
+    ].join('\n'))
+    const ctx = await setup(home)
+
+    const result = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: CallId('c-script'),
+      name: 'skill',
+      arguments: { name: 'script-skill' },
+      agent: { session: { header: { cwd: project } } } as never,
+    })
+
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected script skill success')
+    expect(result.value).toEqual({
+      name: 'script-skill',
+      provider: 'filesystem',
+      resourceBase: { kind: 'directory', path: join(project, '.dsh/skills/script-skill') },
+      script: 'scripts/run.ts',
+      runtime: 'node',
+      content: 'Run the script.',
+    })
+  })
+
   it('renders provider-managed resource hints for non-local skills', async () => {
     const home = await tempDir('tool-resource-hints')
     const ctx = await setup(home)

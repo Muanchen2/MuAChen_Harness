@@ -333,6 +333,28 @@ describe('FileSystemSkillProvider', () => {
     expect(await ctx.skills.get('Bad_Name')).toBeUndefined()
   })
 
+  it('carries script and runtime frontmatter through the metadata channel', async () => {
+    const home = await tempDir('skill-script')
+    const root = join(home, '.dsh/skills')
+    await writeSkill(root, 'script-skill', 'script description', 'Run the script.')
+    await writeFile(join(root, 'script-skill/SKILL.md'), [
+      '---',
+      'name: script-skill',
+      'description: script description',
+      'script: scripts/run.ts',
+      'runtime: node',
+      '---',
+      '',
+      'Run the script.',
+    ].join('\n'))
+
+    const ctx = await setupLocal(home)
+    expect(await ctx.skills.get('script-skill')).toMatchObject({
+      content: 'Run the script.',
+      metadata: { script: 'scripts/run.ts', runtime: 'node' },
+    })
+  })
+
   it('accepts the documented boolean spellings for invocation frontmatter', async () => {
     const home = await tempDir('skill-invocation-booleans')
     const root = join(home, '.dsh/skills')
