@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -149,6 +149,28 @@ function accumulateMessages(decision: PreStepDecision): { text: string }[] {
     .filter((message): message is UserMessage & { source: { kind: 'rin-accumulate' } } =>
       message.source.kind === 'rin-accumulate')
     .map(message => ({ text: message.content.filter(b => b.type === 'text').map(b => b.text ?? '').join(' ') }))
+}
+
+async function gitRun(ctx: Context, cwd: string, ...args: string[]): Promise<void> {
+  const handle = ctx.subprocess.spawn({
+    argv: ['git', ...args],
+    cwd,
+    stdio: { stdin: { data: '' }, stdout: { maxBytes: 64 * 1024 }, stderr: { maxBytes: 64 * 1024 } },
+    graceMs: 30_000,
+  })
+  const outcome = await handle.done
+  if (outcome.exitCode !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${handle.collected.stderr?.readFrom(0).text ?? ''}`)
+  }
+}
+
+/** A git repository with an initial commit and configured identity. */
+async function initRepo(ctx: Context, dir: string): Promise<void> {
+  mkdirSync(dir, { recursive: true })
+  await gitRun(ctx, dir, 'init')
+  await gitRun(ctx, dir, 'config', 'user.name', 'tester')
+  await gitRun(ctx, dir, 'config', 'user.email', 'tester@localhost')
+  await gitRun(ctx, dir, 'commit', '--allow-empty', '-m', 'baseline')
 }
 
 const userPrompt = createUserMessage({
@@ -476,7 +498,10 @@ describe('the memory accumulation plugin', () => {
     const agent = stubAgent(workspace, [userEvent('先到这吧，下次继续', 0)])
     toolResult(ctx, agent)
     endTurn(ctx, agent, 1)
-    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+    // The judge now also walks git dirt (cwd + memory + skill repos); on
+    // Windows each git spawn costs tens of ms, so budget well beyond the
+    // default 1s wait.
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) }, { timeout: 8000 })
 
     // the completed memo was archived automatically; the open one stays
     expect(await ctx.memories.list('workspace', workspace)).toEqual(['handoff/pending-y'])
@@ -507,5 +532,49 @@ describe('the memory accumulation plugin', () => {
     expect(parseArchives('{"archives":"nope"}', 2)).toEqual([])
     expect(parseArchives('{"archives":[{"id":"","reason":"x"}]}', 2)).toEqual([])
     expect(parseArchives('{"archives":[{"id":"design/x"}]}', 2)).toEqual([])
+  })
+
+  it('reminds about new uncommitted changes once, stays quiet after commit', async () => {
+    const { ctx, adapter } = await liveContext(
+      new FakeAdapter([
+        textChunks('{"candidates":[]}'),
+        textChunks('{"candidates":[]}'),
+        textChunks('{"candidates":[]}'),
+      ]),
+      { trigger: 'always' },
+    )
+    const workspace = join(tempRoot('dirt'), 'ws')
+    await initRepo(ctx, workspace)
+    const agent = stubAgent(workspace)
+
+    // Turn 1: a new uncommitted file appears → one reminder.
+    writeFileSync(join(workspace, 'a.txt'), 'new work')
+    toolResult(ctx, agent)
+    endTurn(ctx, agent, 1)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(1) })
+    const first = await stepDecision(ctx, agent, [userPrompt])
+    const firstText = accumulateMessages(first).map(m => m.text).join('\n')
+    expect(firstText).toContain('提交提醒')
+    expect(firstText).toContain('a.txt')
+
+    // Turn 2: nothing changed (discussion-only turn) → no reminder.
+    toolResult(ctx, agent)
+    endTurn(ctx, agent, 2)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(2) })
+    const second = await stepDecision(ctx, agent, [userPrompt])
+    expect(accumulateMessages(second).map(m => m.text).join('\n')).not.toContain('提交提醒')
+
+    // Turn 3: `a.txt` committed, new `b.txt` uncommitted → remind only b.txt.
+    await gitRun(ctx, workspace, 'add', '.')
+    await gitRun(ctx, workspace, 'commit', '-m', 'commit a')
+    writeFileSync(join(workspace, 'b.txt'), 'more work')
+    toolResult(ctx, agent)
+    endTurn(ctx, agent, 3)
+    await vi.waitFor(() => { expect(adapter.requests.length).toBe(3) })
+    const third = await stepDecision(ctx, agent, [userPrompt])
+    const thirdText = accumulateMessages(third).map(m => m.text).join('\n')
+    expect(thirdText).toContain('提交提醒')
+    expect(thirdText).toContain('b.txt')
+    expect(thirdText).not.toContain('a.txt')
   })
 })

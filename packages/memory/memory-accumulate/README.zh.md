@@ -32,6 +32,7 @@ Rin 记忆系统的写侧自动化半边（半自动蒸馏）。每次轮次末�
 | `maxOutputTokens` | `512` | 判断输出 token 上限。 |
 | `timeoutMs` | `30000` | 判断请求截止时间。 |
 | `judgeInterval` | `6` | 关键帧兜底：至少每 N 轮判断一次（仅 keyframe 触发）。 |
+| `commitReminder` | `true` | 提醒会话上下文中**新的**未提交改动（git 脏状态）——cwd 代码仓库、记忆链、技能链。增量检测：只有未见过的文件才产生提醒，纯讨论轮保持安静，提交后重置已见集合。 |
 | `rescueOnCompact` | `true` | 会话压缩前救援判断：`compaction/start` 同步帧化对话尾部并运行一次判断，使经验在摘要替换它之前被蒸馏。 |
 | `provider` / `model` | — | 显式路由；默认使用会话最新的 `request/header` 路由。 |
 
@@ -41,6 +42,7 @@ Rin 记忆系统的写侧自动化半边（半自动蒸馏）。每次轮次末�
 - `session/event` `compaction/start` → 救援判断（`rescueOnCompact` 时）：判断在 harness 用摘要替换前同步帧化压缩前尾部，使重要内容不会丢失于模型收缩的窗口。
 - 判断流式调用一次辅助 `ctx.llm` 请求（路由来自配置或最新 `request/header`），把帧化消息（JSON）作为输入，请求 `{"candidates":[{title, content}], "handoffs":[{title, content}], "archives":[{id, reason}]}`，其中 `handoffs` 携带未完成任务交接单（目标/进度/下一步/遗留坑/相关文件 结构），`archives` 点名片段推翻的既有记忆；答案被宽容解析（允许代码围栏和散落散文）。既有记忆列表携带 id，使判断能点名陈旧节点。超过 `maxInputBytes` 的输入从头部裁剪，因此长轮次从尾部被判断而不是被跳过。
 - 每次判断运行先自动归档祖先链上已完成的交接单（标题含"已完成"），然后运行 LLM 判断。
+- 每次判断运行还执行确定性的 git 脏状态检查（`commitReminder`）：对 cwd 代码仓库、祖先链上每个记忆 store（含 central）、链上每个技能根（含用户层）跑 `git status --short`。检查按会话增量进行——已提醒过的文件不再提醒，消失的文件（已提交或回滚）从已见集合移除，**新的**文件以 `## 提交提醒` 段与记忆候选并列提醒一次。无新改动的纯讨论轮保持安静。
 - 两个列表都通过第二次校验调用与已存祖先链记忆去重；已作为 `handoff/<task>` 节点存在的交接单被丢弃。
 - 候选按会话缓存（`WeakMap`）；下一次 `agent/pre-step` 把一条 `rin-accumulate` 用户消息折叠进请求并清空缓存，因此候选恰好呈现一次。
 - 失败（路由缺失、超时、解析失败、流错误）被记录并跳过；会话从不因判断阻塞。

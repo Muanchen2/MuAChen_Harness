@@ -32,6 +32,7 @@ Injects `llm`.
 | `maxOutputTokens` | `512` | Judge output-token cap. |
 | `timeoutMs` | `30000` | Judge request deadline. |
 | `judgeInterval` | `6` | Keyframe fallback: judge at least every N turns (keyframe trigger only). |
+| `commitReminder` | `true` | Remind about NEW uncommitted changes (git dirt) in the session's context — cwd repository, memory chain, skill chain. Incremental: only files not seen before are reported, so discussion-only turns stay quiet and committed work resets the seen set. |
 | `rescueOnCompact` | `true` | Rescue judgment before session compaction: `compaction/start` frames the conversation tail synchronously and runs one judge pass, so experience is distilled before the summary replaces it. |
 | `provider` / `model` | — | Explicit route; defaults to the session's latest `request/header` route. |
 
@@ -41,6 +42,7 @@ Injects `llm`.
 - `session/event` `compaction/start` → rescue judge (when `rescueOnCompact`): the judge frames the pre-compaction tail synchronously before the harness replaces it with a summary, so nothing important is lost to the model's shrinking window.
 - The judge streams an auxiliary `ctx.llm` call (route from config or the latest `request/header`) over the framed messages (JSON), asking for `{"candidates":[{title, content}], "handoffs":[{title, content}], "archives":[{id, reason}]}` where `handoffs` carries unfinished-task memos (目标/进度/下一步/遗留坑/相关文件 structure) and `archives` names existing memories the fragment overturns; the answer is parsed tolerantly (code fences and stray prose allowed). The existing-memory list carries ids so the judge can name stale nodes. Inputs over `maxInputBytes` are trimmed from the head, so a long turn is judged from its tail rather than skipped.
 - Each judge run first auto-archives completed handoff memos on the ancestor chain (title contains "已完成"), then runs the LLM judgment.
+- Each judge run also performs a deterministic git-dirt check (`commitReminder`): `git status --short` over the cwd repository, every memory store on the ancestor chain (plus central), and every skill root on the chain (plus the user layer). The check is incremental per session — a file already reported produces no further reminder, a file that disappears (committed or reverted) leaves the seen set, and NEW files are reported once as a `## 提交提醒` section beside the memory candidates. Discussion-only turns with no new changes stay quiet.
 - Both lists are deduplicated against the stored ancestor-chain memories by a second verifier call; handoff memos already present as `handoff/<task>` nodes are dropped.
 - Candidates are cached per session (`WeakMap`); the next `agent/pre-step` folds one `rin-accumulate` user message into the request and clears the cache, so candidates are presented exactly once.
 - Failures (route missing, timeout, parse failure, stream error) are logged and skipped; the session never blocks on judgment.

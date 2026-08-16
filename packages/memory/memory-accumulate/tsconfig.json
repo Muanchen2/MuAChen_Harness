@@ -33,6 +33,12 @@
       "path": "../../runtime-diagnostics/invariants"
     },
     {
+      "path": "../../subprocess/subprocess"
+    },
+    {
+      "path": "../../util/home-paths"
+    },
+    {
       "path": "../../util/timeout"
     }
   ]

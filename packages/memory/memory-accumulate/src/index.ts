@@ -17,11 +17,13 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { isDeepStrictEqual } from 'node:util'
-import { dirname } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { BlockAssembler, createUserMessage, deepFreeze } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import type { MemoryService } from '@deepseek-ai/dsh-memory'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { deriveEventMessage, type Session } from '@deepseek-ai/dsh-session'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
@@ -30,7 +32,7 @@ import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 
 export const name = 'memory-accumulate'
-export const inject = ['llm', 'memories']
+export const inject = ['llm', 'memories', 'subprocess']
 
 /** One candidate memory (or handoff memo) proposed by the judge. */
 export interface MemoryCandidate {
@@ -44,6 +46,14 @@ export interface ArchiveCandidate {
   readonly reason: string
 }
 
+/** Uncommitted changes in one git repository of the session's context. */
+export interface GitDirt {
+  /** Repository path (git root). */
+  readonly repo: string
+  /** Changed or untracked file paths, as reported by `git status --short`. */
+  readonly files: readonly string[]
+}
+
 /** Durable producer facts for one accumulation prompt. */
 export interface MemoryAccumulateSource {
   kind: 'rin-accumulate'
@@ -55,6 +65,8 @@ export interface MemoryAccumulateSource {
   readonly handoffs: readonly string[]
   /** Archive proposal ids, for quick scanning. */
   readonly archives: readonly string[]
+  /** Repos with NEW uncommitted changes since the last observation. */
+  readonly commitReminders: readonly { repo: string; files: number }[]
 }
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -96,6 +108,13 @@ export interface Config {
   /** Keyframe fallback: judge at least every N turns (keyframe trigger only). */
   judgeInterval?: number
   /**
+   * Remind about NEW uncommitted changes (git dirt) in the session's context
+   * — the cwd repository, the memory chain, and the skill chain. The check is
+   * incremental: only files not seen before produce a reminder, so
+   * discussion-only turns stay quiet and committed work resets the seen set.
+   */
+  commitReminder?: boolean
+  /**
    * Rescue judgment before session compaction: when the harness compacts a
    * long conversation into a summary, the pre-compaction tail would otherwise
    * be invisible to the model forever. On `compaction/start` the plugin frames
@@ -117,6 +136,7 @@ export const Config: Schema<Config> = z.object({
   maxOutputTokens: z.number().step(1).min(1).default(512),
   timeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(30_000),
   judgeInterval: z.number().step(1).min(1).default(6),
+  commitReminder: z.boolean().default(true),
   rescueOnCompact: z.boolean().default(true),
   provider: z.string(),
   model: z.string(),
@@ -152,6 +172,10 @@ const pendingCandidates = new WeakMap<Session, {
   handoffs: MemoryCandidate[]
   archives: ArchiveCandidate[]
 }>()
+/** Per-session NEW uncommitted-change reminders awaiting presentation. */
+const pendingDirt = new WeakMap<Session, { turn: number; dirt: GitDirt[] }>()
+/** Per-session set of dirt keys (`repo\0file`) already seen this session. */
+const seenDirt = new WeakMap<Session, Set<string>>()
 /** Sessions with tool activity in the current turn, for the on-activity trigger. */
 const activeTurns = new WeakSet<Session>()
 /** Last judged turn per session, for the keyframe fallback interval. */
@@ -172,6 +196,142 @@ const lastJudged = new WeakMap<Session, number>()
  * intent, not guessing.
  */
 const KEYFRAME_RE = /(先到(这|这儿|这里)?|就到这|先这样|差不多了|收尾|总结一下|总结下|结束(吧|了)?|下次(再|继续)|明天(再|继续)|交接|handoff|待办|还有|另外|顺便|接下来|换个|再帮|现在(做|来|弄)|新任务)/i
+
+/** One dirt key: the repo path and the changed file, NUL-joined. */
+function dirtKey(repo: string, file: string): string {
+  return `${repo}\0${file}`
+}
+
+/** Ancestor directories of `cwd` including itself, nearest first, to the root. */
+function ancestorDirs(cwd: string): string[] {
+  const directories: string[] = []
+  let current = resolve(cwd)
+  for (;;) {
+    directories.push(current)
+    const parent = dirname(current)
+    if (parent === current) return directories
+    current = parent
+  }
+}
+
+async function dirExists(dir: string): Promise<boolean> {
+  try {
+    const stat = await (await import('node:fs/promises')).stat(dir)
+    return stat.isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/** The subprocess service, resolved through `ctx.get` like dsh-memory's git backend. */
+function subprocessOf(ctx: Context): SubprocessRuntime {
+  const value: unknown = ctx.get('subprocess')
+  const subprocess = value as SubprocessRuntime | undefined
+  if (subprocess === undefined) {
+    throw new Error('memory-accumulate: the subprocess service is required for the git dirt check')
+  }
+  return subprocess
+}
+
+/** The git root containing `dir`, or undefined when `dir` is not inside a repository. */
+async function gitRootOf(ctx: Context, dir: string): Promise<string | undefined> {
+  try {
+    const handle = subprocessOf(ctx).spawn({
+      argv: ['git', 'rev-parse', '--show-toplevel'],
+      cwd: dir,
+      stdio: { stdin: { data: '' }, stdout: { maxBytes: 64 * 1024 }, stderr: { maxBytes: 64 * 1024 } },
+      graceMs: 10_000,
+    })
+    const outcome = await handle.done
+    if (outcome.exitCode !== 0) return undefined
+    const text = handle.collected.stdout?.readFrom(0).text ?? ''
+    return text.trim() === '' ? undefined : text.trim()
+  } catch {
+    return undefined
+  }
+}
+
+/** Changed or untracked file paths of one repository, via `git status --short`. */
+async function gitStatusFiles(ctx: Context, repo: string): Promise<string[]> {
+  try {
+    const handle = subprocessOf(ctx).spawn({
+      argv: ['git', 'status', '--short'],
+      cwd: repo,
+      stdio: { stdin: { data: '' }, stdout: { maxBytes: 256 * 1024 }, stderr: { maxBytes: 64 * 1024 } },
+      graceMs: 10_000,
+    })
+    const outcome = await handle.done
+    if (outcome.exitCode !== 0) return []
+    const stdout = handle.collected.stdout?.readFrom(0).text ?? ''
+    const files: string[] = []
+    for (const raw of stdout.split('\n')) {
+      const line = raw.trim()
+      if (line.length > 0) files.push(line.slice(3))
+    }
+    return files
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Collect uncommitted changes across the session's context: the cwd
+ * repository, every memory store on the ancestor chain (plus central), and
+ * every skill root on the chain (plus the user layer). Deterministic, zero
+ * LLM cost. Failures are contained per repository — a broken repo must never
+ * break the reminder.
+ */
+async function collectGitDirt(ctx: Context, cwd: string | undefined): Promise<GitDirt[]> {
+  if (cwd === undefined) return []
+  const repos = new Set<string>()
+  const root = await gitRootOf(ctx, cwd)
+  if (root !== undefined) repos.add(root)
+  try {
+    for (const entry of await ctx.memories.loadChain(cwd)) repos.add(entry.store)
+  } catch {
+    // a failing memory chain read must not break the reminder
+  }
+  const dshHome = resolveDshHome()
+  for (const dir of ancestorDirs(cwd)) {
+    const candidate = join(dir, '.dsh-skills')
+    if (await dirExists(candidate)) repos.add(candidate)
+  }
+  const userSkills = join(dshHome, 'skills')
+  if (await dirExists(userSkills)) repos.add(userSkills)
+  const dirt: GitDirt[] = []
+  for (const repo of repos) {
+    const files = await gitStatusFiles(ctx, repo)
+    if (files.length > 0) dirt.push({ repo, files })
+  }
+  return dirt
+}
+
+/**
+ * Incremental dirt check: files already seen this session produce no
+ * reminder (discussion-only turns stay quiet), files that disappeared (were
+ * committed or reverted) leave the seen set, and NEW files enter it and are
+ * reported. Returns the fresh dirt per repository.
+ */
+function diffDirt(session: Session, dirt: readonly GitDirt[]): GitDirt[] {
+  const seen = seenDirt.get(session) ?? new Set<string>()
+  const current = new Set<string>()
+  const fresh: GitDirt[] = []
+  for (const entry of dirt) {
+    const newFiles: string[] = []
+    for (const file of entry.files) {
+      const key = dirtKey(entry.repo, file)
+      current.add(key)
+      if (!seen.has(key)) newFiles.push(file)
+    }
+    if (newFiles.length > 0) fresh.push({ repo: entry.repo, files: newFiles })
+  }
+  for (const key of [...seen]) {
+    if (!current.has(key)) seen.delete(key)
+  }
+  for (const key of current) seen.add(key)
+  seenDirt.set(session, seen)
+  return fresh
+}
 
 /** Real user messages on the durable event stream, oldest first, with their seq. */
 function userTextsOf(session: Session): Array<{ at: number; text: string }> {
@@ -452,6 +612,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const maxOutputTokens = config.maxOutputTokens ?? 512
   const timeoutMs = config.timeoutMs ?? 30_000
   const judgeInterval = config.judgeInterval ?? 6
+  const commitReminder = config.commitReminder ?? true
   const rescueOnCompact = config.rescueOnCompact ?? true
 
   /**
@@ -464,6 +625,16 @@ export function apply(ctx: Context, config: Config = {}): void {
    */
   const judge = async (session: Session, turn: number, tailOnly = false): Promise<void> => {
     try {
+      // Layer 0 (deterministic, zero LLM): NEW uncommitted changes in the
+      // session's context repos (cwd code, memory chain, skill chain).
+      if (commitReminder) {
+        try {
+          const fresh = diffDirt(session, await collectGitDirt(ctx, session.header.cwd))
+          if (fresh.length > 0) pendingDirt.set(session, { turn, dirt: fresh })
+        } catch (error) {
+          ctx.logger.warn('memory-accumulate: git dirt check failed: %o', error)
+        }
+      }
       // Layer 1 (deterministic, zero LLM): handoff memos whose title marks
       // them complete are archived automatically — an explicit state, and
       // archive is reversible, so this cannot lose anything.
@@ -557,10 +728,13 @@ export function apply(ctx: Context, config: Config = {}): void {
   ): Promise<PreStepDecision> => {
     const decision = await next()
     const pending = pendingCandidates.get(agent.session)
-    if (pending === undefined) return decision
+    const dirtPending = pendingDirt.get(agent.session)
+    const pendingEmpty = pending === undefined
+      || (pending.candidates.length === 0 && pending.handoffs.length === 0 && pending.archives.length === 0)
+    if (pendingEmpty && (dirtPending === undefined || dirtPending.dirt.length === 0)) return decision
     if (decision.kind === 'reject' || decision.messages.length === 0) return decision
     const sections: string[] = []
-    if (pending.candidates.length > 0) {
+    if (pending !== undefined && pending.candidates.length > 0) {
       sections.push(
         `## 记忆沉淀候选（来自第 ${pending.turn} 轮）`,
         '',
@@ -573,7 +747,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         '可用 memory remember 写入（按命名约定选择 id，同主题则更新已有记忆），修改后写入或忽略均可。',
       )
     }
-    if (pending.handoffs.length > 0) {
+    if (pending !== undefined && pending.handoffs.length > 0) {
       sections.push(
         `## 交接单候选（来自第 ${pending.turn} 轮）`,
         '',
@@ -586,7 +760,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         '可用 memory remember 以 handoff/<任务名> 写入（结构：目标/进度/下一步/遗留坑/相关文件），或忽略。',
       )
     }
-    if (pending.archives.length > 0) {
+    if (pending !== undefined && pending.archives.length > 0) {
       sections.push(
         `## 归档候选（来自第 ${pending.turn} 轮）`,
         '',
@@ -598,18 +772,31 @@ export function apply(ctx: Context, config: Config = {}): void {
         '确认后用 memory archive <id> 归档（移入 archive/，可恢复），或忽略。',
       )
     }
+    if (dirtPending !== undefined && dirtPending.dirt.length > 0) {
+      sections.push(
+        `## 提交提醒（来自第 ${dirtPending.turn} 轮）`,
+        '',
+        '以下仓库有新的未提交改动（git），建议提交或处理：',
+        ...dirtPending.dirt.map(entry =>
+          `- ${entry.repo}：${entry.files.length} 个文件（${entry.files.slice(0, 3).join('、')}${entry.files.length > 3 ? '…' : ''}）`),
+        '',
+        '提交或确认无需提交后，此提醒自动消失（增量检测，讨论轮不打扰）。',
+      )
+    }
     const text = sections.join('\n')
     const desired = createUserMessage({
       content: [{ type: 'text', text }],
       source: {
         kind: 'rin-accumulate',
-        turn: pending.turn,
-        candidates: pending.candidates.map(candidate => candidate.title),
-        handoffs: pending.handoffs.map(candidate => candidate.title),
-        archives: pending.archives.map(candidate => candidate.id),
+        turn: pending?.turn ?? dirtPending?.turn ?? 0,
+        candidates: pending?.candidates.map(candidate => candidate.title) ?? [],
+        handoffs: pending?.handoffs.map(candidate => candidate.title) ?? [],
+        archives: pending?.archives.map(candidate => candidate.id) ?? [],
+        commitReminders: dirtPending?.dirt.map(entry => ({ repo: entry.repo, files: entry.files.length })) ?? [],
       },
     })
     pendingCandidates.delete(agent.session)
+    pendingDirt.delete(agent.session)
     signal.throwIfAborted()
     if (decision.messages.some(message => samePayload(message, desired))) return decision
     const lastClaimedIndex = decision.messages.findLastIndex(message => messages.includes(message))
