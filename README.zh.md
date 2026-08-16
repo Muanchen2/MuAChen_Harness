@@ -69,6 +69,6 @@ pnpm dsh web
 
 ## 许可证
 
-[MIT](LICENSE)
+上游 DeepSeek Harness 代码：[MIT](LICENSE)。本 fork 由 Muanchen2/Rin 的原创贡献（如 `packages/memory/`）为 GPL-3.0；完整的两层许可声明见 [YOUR_LICENSE.md](YOUR_LICENSE.md)。
 
 第三方依赖及其许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
