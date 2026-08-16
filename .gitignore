@@ -48,3 +48,4 @@ dsh-web.log
 /Microsoft.Web.WebView2.WinForms.dll
 /WebView2Loader.dll
 /start.exe.WebView2/
+/tools/desktop-shell/
