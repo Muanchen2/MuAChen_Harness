@@ -24,6 +24,7 @@ import {
   deepFreeze,
   errorChain,
   markAgentLoopRequest,
+  fingerprintGenerateOptions,
 } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -350,6 +351,8 @@ export class ReactLoopAgent implements Agent {
         assembler.push(chunk)
       }
       signal.throwIfAborted()
+      const usage = assembler.usage
+      if (usage !== undefined) this.dispatch.emit('agent/request-usage', { turn, step, usage })
       const finish = assembler.finish
       if (finish.kind === 'error' || finish.kind === 'aborted') {
         const action = await this.dispatch.waterfall(
@@ -491,6 +494,11 @@ export class ReactLoopAgent implements Agent {
       sessionId: this.session.id,
       signal,
     }))
+    this.dispatch.emit('agent/request-fingerprint', {
+      turn,
+      step,
+      fingerprint: fingerprintGenerateOptions(request),
+    })
     return { request, ...preparedCall === undefined ? {} : { preparedCall } }
   }
 }

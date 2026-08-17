@@ -7,7 +7,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
-import type { LlmCallConfig, LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
+import type { LlmCallConfig, LlmFailure, RequestFingerprint, ResolvedRetryPolicy, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { AgentCancelCause, Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 export type { AgentCancelCause } from '@deepseek-ai/dsh-session'
 import type { Inbox } from './inbox.ts'
@@ -258,6 +258,26 @@ declare module '@deepseek-ai/cordis' {
      * @mode waterfall
      */
     'agent/request-error'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; provider: string; failure: LlmFailure; retryPolicy: ResolvedRetryPolicy | undefined; signal: AbortSignal }, next: () => Promise<RequestErrorAction>): Promise<RequestErrorAction>
+    /**
+     * Redacted fingerprint of one assembled request, emitted before provider dispatch.
+     * The payload contains hashes and message positions only; it is not durable or model-visible.
+     * @param payload.agent - the agent issuing the request.
+     * @param payload.turn - the owning turn.
+     * @param payload.step - the owning step.
+     * @param payload.fingerprint - hashed request segments.
+     * @mode emit
+     */
+    'agent/request-fingerprint'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; fingerprint: RequestFingerprint }): void
+    /**
+     * Redacted usage for the request completed at one step. This is a transient
+     * diagnostic companion to `agent/request-fingerprint`, not a session event.
+     * @param payload.agent - the agent that issued the request.
+     * @param payload.turn - the owning turn.
+     * @param payload.step - the owning step.
+     * @param payload.usage - provider-reported token counts.
+     * @mode emit
+     */
+    'agent/request-usage'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; usage: TokenUsage }): void
     /**
      * The turn is about to close: the model owes no response (no live tool
      * calls, no fresh steering). Awaited before the boundary commits — a
