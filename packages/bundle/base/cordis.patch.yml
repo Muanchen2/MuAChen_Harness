@@ -145,6 +145,12 @@
     # shutdownTimeoutMillis is the load-bearing outer bound when a transport
     # promise never settles. Every CLI exit path drains it by disposing the root
     # on SIGINT/SIGTERM.
+    - id: session-request-diagnostics
+      name: '@deepseek-ai/dsh-session-request-diagnostics'
+      disabled: !!js process.env.DSH_REQUEST_DIAGNOSTICS_PATH === undefined
+      config:
+        path: !!js process.env.DSH_REQUEST_DIAGNOSTICS_PATH
+
     - id: session-telemetry-otel
       name: '@deepseek-ai/dsh-session-telemetry-otel'
       config:
