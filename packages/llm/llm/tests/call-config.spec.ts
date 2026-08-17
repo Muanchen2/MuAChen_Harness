@@ -6,11 +6,11 @@
 
 import { describe, expect, it } from 'vitest'
 import { callConfigEquals, deepFreeze, firstFingerprintDifference, fingerprintGenerateOptions, isAgentLoopRequest, markAgentLoopRequest } from '../src/call-config.ts'
-import { ReasoningEffortId } from '../src/brand.ts'
+import { MessageId, ReasoningEffortId } from '../src/brand.ts'
 import type { GenerateOptions } from '../src/types.ts'
 
 describe('request fingerprints', () => {
-  const base = { provider: 'p', model: 'm', messages: [{ id: '1', role: 'user' as const, content: [{ type: 'text' as const, text: 'secret prompt' }], source: { kind: 'user' as const } }] }
+  const base = { provider: 'p', model: 'm', messages: [{ id: MessageId('1'), role: 'user' as const, content: [{ type: 'text' as const, text: 'secret prompt' }], source: { kind: 'user' as const } }] }
   it('is stable and excludes raw text', () => {
     const fingerprint = fingerprintGenerateOptions(base)
     expect(fingerprintGenerateOptions({ ...base, messages: [...base.messages] })).toEqual(fingerprint)
@@ -19,7 +19,7 @@ describe('request fingerprints', () => {
   it('isolates segment changes and identifies the first changed message', () => {
     expect(firstFingerprintDifference(fingerprintGenerateOptions(base), fingerprintGenerateOptions({ ...base, system: 'system' }))).toBe('system')
     expect(firstFingerprintDifference(fingerprintGenerateOptions(base), fingerprintGenerateOptions({ ...base, tools: [{ name: 't', description: 'd', parameters: {} }] }))).toBe('tools')
-    const changed = { ...base, messages: [...base.messages, { ...base.messages[0]!, id: '2' as never }] }
+    const changed = { ...base, messages: [...base.messages, { ...base.messages[0]!, id: MessageId('2') }] }
     expect(firstFingerprintDifference(fingerprintGenerateOptions(base), fingerprintGenerateOptions(changed))).toBe(1)
   })
   it('is stable across object key order', () => {

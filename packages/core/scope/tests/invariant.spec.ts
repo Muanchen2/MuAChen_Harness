@@ -66,6 +66,8 @@ describe('scoped-dispatch invariants', () => {
         },
         () => Promise.resolve(undefined),
       ],
+      'agent/request-fingerprint': [{ agent, turn: 1, step: 1, fingerprint: { config: 'x', system: 'x', tools: 'x', messages: 'x', messageHashes: [] } }],
+      'agent/request-usage': [{ agent, turn: 1, step: 1, usage: { inputTokens: 1, outputTokens: 1 } }],
       'agent/turn-stopping': [{ agent, turn: 1, signal }],
       'agent/error': [{ agent, turn: 1, step: 0, error: new Error('x') }],
     } satisfies { [K in AgentEventName]: EventArgs<K> }
