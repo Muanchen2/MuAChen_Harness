@@ -53,3 +53,10 @@ dsh-web.log
 /start.exe.WebView2/
 /tools/desktop-shell/
 /start.exe.old
+
+# Request diagnostics output (JSONL) and desktop shortcuts
+/enabled
+*.lnk
+
+# WorkBuddy workspace memory
+.workbuddy/
