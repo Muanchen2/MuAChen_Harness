@@ -3,7 +3,7 @@ import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { CallId, createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { toPiContext } from '../src/context.ts'
+import { fingerprintPiContext, toPiContext } from '../src/context.ts'
 import { toPiAssistant } from '../src/replay.ts'
 
 const ref: ImageAttachmentRef = {
@@ -35,6 +35,16 @@ function user(content: ContentBlock[]): Message {
 function history(role: 'system' | 'assistant', content: ContentBlock[]): Message {
   return createMessage({ role, content, source: { kind: 'plugin', plugin: 'test' } })
 }
+
+describe('provider-facing context fingerprints', () => {
+  it('hashes converted messages and tools without exposing prompt text', () => {
+    const context = toPiContext(request([user([{ type: 'text', text: 'provider secret' }])]))
+    const fingerprint = fingerprintPiContext(context)
+    expect(fingerprint.messages).toHaveLength(1)
+    expect(JSON.stringify(fingerprint)).not.toContain('provider secret')
+    expect(fingerprintPiContext(context)).toEqual(fingerprint)
+  })
+})
 
 describe('pi-ai request context conversion', () => {
   it('omits absent and empty request-level optional fields', () => {

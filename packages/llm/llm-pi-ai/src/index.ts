@@ -56,6 +56,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
@@ -67,6 +69,8 @@ import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
 
 export { PiAiAdapter } from './adapter.ts'
+export { fingerprintPiContext } from './context.ts'
+export type { PiAiContextFingerprint } from './context.ts'
 export type { PiAiAdapterOptions } from './adapter.ts'
 export { Config } from './config.ts'
 export type {
@@ -197,10 +201,22 @@ export function apply(ctx: Context, config: Config): void {
     )
   }
 
+  const writeDiagnostic = (record: unknown): void => {
+    if (config.requestFingerprintDiagnosticsPath === undefined) return
+    mkdirSync(dirname(config.requestFingerprintDiagnosticsPath), { recursive: true })
+    appendFileSync(config.requestFingerprintDiagnosticsPath, `${JSON.stringify(record)}\n`, 'utf8')
+  }
   const adapter = new PiAiAdapter({
     profiles,
     resolveApiKey,
     resolveAttachments: () => ctx.get('attachments'),
+    ...config.requestFingerprintDiagnostics === true ? {
+      onRequestFingerprint: (diagnostic) => {
+        ctx.logger.info('llm-pi-ai request fingerprint: %o', diagnostic)
+        writeDiagnostic({ kind: 'provider-request-fingerprint', ...diagnostic })
+      },
+      onRequestUsage: diagnostic => writeDiagnostic({ kind: 'provider-request-usage', ...diagnostic }),
+    } : {},
   })
   // The full installed catalog is configurable from the moment the plugin
   // mounts — dormant or not — so configuration surfaces can offer every

@@ -5,6 +5,7 @@
  */
 
 import { CallId, contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
+import { createHash } from 'node:crypto'
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { Context as PiContext, ImageContent, Message as PiMessage, TextContent, Tool as PiTool } from '@earendil-works/pi-ai'
@@ -62,6 +63,34 @@ async function userContent(
   }
   if (content.every(block => block.type === 'text')) return content.map(block => block.text).join('')
   return content
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === undefined) return 'undefined'
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`
+}
+
+function sha256(value: unknown): string {
+  return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex')
+}
+
+/** Hashes of the provider-facing context, with no retained prompt content. */
+export interface PiAiContextFingerprint {
+  readonly context: string
+  readonly messages: readonly string[]
+  readonly tools: string
+}
+
+/** Produce a redacted fingerprint after Harness messages have been converted to pi-ai messages. */
+export function fingerprintPiContext(context: PiContext): PiAiContextFingerprint {
+  return Object.freeze({
+    context: sha256({ ...context, messages: undefined }),
+    messages: Object.freeze(context.messages.map(message => sha256(message))),
+    tools: sha256(context.tools),
+  })
 }
 
 function toolsOf(options: GenerateOptions): PiTool[] | undefined {

@@ -50,7 +50,7 @@ import type {
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
-import { toPiContext } from './context.ts'
+import { fingerprintPiContext, toPiContext } from './context.ts'
 import { toStreamChunks } from './stream.ts'
 
 /** One resolution's frozen view: the profiles and the collection built from them. */
@@ -61,7 +61,15 @@ interface PiAiSnapshot {
   models: Models
 }
 
-/** Constructor options for {@link PiAiAdapter}: the two resolution hooks the plugin owns. */
+/** Provider-facing request facts emitted after Harness-to-pi-ai conversion. */
+export interface PiAiRequestFingerprintDiagnostic {
+  readonly provider: string
+  readonly model: string
+  readonly hasSessionId: boolean
+  readonly fingerprint: import('./context.ts').PiAiContextFingerprint
+}
+
+/** Constructor options for {@link PiAiAdapter}: resolution and diagnostic hooks. */
 export interface PiAiAdapterOptions {
   /** Current validated profiles by provider route; called once per operation. */
   profiles: () => ReadonlyMap<string, ResolvedPiAiProviderProfile>
@@ -76,6 +84,10 @@ export interface PiAiAdapterOptions {
   resolveApiKey: (provider: string, profile: ResolvedPiAiProviderProfile) => Promise<string | undefined>
   /** Resolve the optional durable attachment service at request time. */
   resolveAttachments?: () => AttachmentStore | undefined
+  /** Observe redacted provider-facing request facts without retaining prompt content. */
+  onRequestFingerprint?: (diagnostic: PiAiRequestFingerprintDiagnostic) => void
+  /** Observe provider-reported usage without retaining response content. */
+  onRequestUsage?: (diagnostic: { readonly provider: string; readonly model: string; readonly usage: import('@deepseek-ai/dsh-llm').TokenUsage }) => void
 }
 
 /** Copy profile stream knobs into pi-ai's common option vocabulary. */
@@ -310,6 +322,12 @@ export class PiAiAdapter extends LlmAdapter {
       const context = attachments === undefined
         ? toPiContext(options)
         : await toPiContext(options, attachments)
+      this.config.onRequestFingerprint?.({
+        provider: options.provider,
+        model: options.model,
+        hasSessionId: options.sessionId !== undefined,
+        fingerprint: fingerprintPiContext(context),
+      })
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
@@ -331,6 +349,7 @@ export class PiAiAdapter extends LlmAdapter {
             exhausted = true
             return
           }
+          if (result.value.type === 'usage') this.config.onRequestUsage?.({ provider: options.provider, model: options.model, usage: result.value.usage })
           yield result.value
         }
       } finally {

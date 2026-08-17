@@ -43,10 +43,12 @@ async function harness(baseURL: string, overrides: Record<string, unknown> = {})
 function adapterOf(
   providers: Record<string, LlmPiAi.PiAiProviderProfile>,
   apiKey: string | undefined = 'test-key',
+  onRequestFingerprint?: LlmPiAi.PiAiAdapterOptions['onRequestFingerprint'],
 ): PiAiAdapter {
   return new PiAiAdapter({
     profiles: () => resolveProfiles(providers),
     resolveApiKey: () => Promise.resolve(apiKey),
+    ...onRequestFingerprint === undefined ? {} : { onRequestFingerprint },
   })
 }
 
@@ -57,6 +59,21 @@ beforeEach(() => {
 })
 
 describe('PiAiAdapter provider routing', () => {
+  it('reports redacted converted-context fingerprints and session metadata before dispatch', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const diagnostics: LlmPiAi.PiAiRequestFingerprintDiagnostic[] = []
+    const adapter = adapterOf({
+      deepseek: { apiKeyEnv: 'PI_TEST_KEY', baseURL: server.url },
+    }, 'test-key', diagnostic => diagnostics.push(diagnostic))
+    for await (const _chunk of adapter.stream({
+      provider: 'deepseek', model: 'deepseek-v4-flash',
+      messages: [createUserMessage({ content: [{ type: 'text', text: 'secret' }], source: { kind: 'plugin', plugin: 'test' } })],
+      sessionId: 's1' as never,
+    })) { /* drain */ }
+    expect(diagnostics).toHaveLength(1)
+    expect(diagnostics[0]).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash', hasSessionId: true })
+    expect(JSON.stringify(diagnostics[0])).not.toContain('secret')
+  })
   it('resolves a catalog model dynamically and uses a private endpoint', async () => {
     const server = await mockServer([{ events: textEvents }])
     const ctx = await harness(server.url)

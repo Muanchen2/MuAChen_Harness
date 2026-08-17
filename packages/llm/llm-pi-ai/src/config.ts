@@ -171,6 +171,13 @@ export interface ResolvedPiAiProviderProfile
 /** Plugin configuration: the provider routes this instance owns. */
 export interface Config {
   /**
+   * Emit redacted provider-request fingerprints to the process logger. This is
+   * disabled by default and never logs prompt, message, tool, or credential values.
+   */
+  requestFingerprintDiagnostics?: boolean
+  /** Optional JSONL destination for the same redacted diagnostics; disabled when absent. */
+  requestFingerprintDiagnosticsPath?: string
+  /**
    * pi-ai provider routes, keyed by provider. An empty (or omitted) dict is
    * the dormant settings-driven posture: the adapter mounts with no routes
    * and registers them the moment a settings section supplies profiles.
@@ -253,6 +260,8 @@ const profile = z.object({
 
 /** Runtime schema for {@link Config}. */
 export const Config: z<Config> = z.object({
+  requestFingerprintDiagnostics: z.boolean().default(false),
+  requestFingerprintDiagnosticsPath: z.string(),
   providers: z.dict(profile).default({}),
 })
 
