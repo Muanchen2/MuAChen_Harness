@@ -5,9 +5,29 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { callConfigEquals, deepFreeze, isAgentLoopRequest, markAgentLoopRequest } from '../src/call-config.ts'
+import { callConfigEquals, deepFreeze, firstFingerprintDifference, fingerprintGenerateOptions, isAgentLoopRequest, markAgentLoopRequest } from '../src/call-config.ts'
 import { ReasoningEffortId } from '../src/brand.ts'
 import type { GenerateOptions } from '../src/types.ts'
+
+describe('request fingerprints', () => {
+  const base = { provider: 'p', model: 'm', messages: [{ id: '1', role: 'user' as const, content: [{ type: 'text' as const, text: 'secret prompt' }], source: { kind: 'user' as const } }] }
+  it('is stable and excludes raw text', () => {
+    const fingerprint = fingerprintGenerateOptions(base)
+    expect(fingerprintGenerateOptions({ ...base, messages: [...base.messages] })).toEqual(fingerprint)
+    expect(JSON.stringify(fingerprint)).not.toContain('secret prompt')
+  })
+  it('isolates segment changes and identifies the first changed message', () => {
+    expect(firstFingerprintDifference(fingerprintGenerateOptions(base), fingerprintGenerateOptions({ ...base, system: 'system' }))).toBe('system')
+    expect(firstFingerprintDifference(fingerprintGenerateOptions(base), fingerprintGenerateOptions({ ...base, tools: [{ name: 't', description: 'd', parameters: {} }] }))).toBe('tools')
+    const changed = { ...base, messages: [...base.messages, { ...base.messages[0]!, id: '2' as never }] }
+    expect(firstFingerprintDifference(fingerprintGenerateOptions(base), fingerprintGenerateOptions(changed))).toBe(1)
+  })
+  it('is stable across object key order', () => {
+    const a = { ...base, tools: [{ name: 't', description: 'd', parameters: { z: 1, a: 2 } }] }
+    const b = { ...base, tools: [{ parameters: { a: 2, z: 1 }, description: 'd', name: 't' }] }
+    expect(fingerprintGenerateOptions(a)).toEqual(fingerprintGenerateOptions(b))
+  })
+})
 
 describe('callConfigEquals', () => {
   it('compares every field, including the stop list element-wise', () => {

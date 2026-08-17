@@ -6,6 +6,7 @@
  * @module dsh-llm/call-config
  */
 
+import { createHash } from 'node:crypto'
 import type { GenerateOptions } from './types.ts'
 import type { ReasoningEffortId } from './brand.ts'
 
@@ -75,6 +76,60 @@ export function markAgentLoopRequest<T extends GenerateOptions>(request: T): T {
  */
 export function isAgentLoopRequest(request: GenerateOptions): boolean {
   return AGENT_LOOP_REQUESTS.has(request)
+}
+
+/** Names of request regions tracked by a request fingerprint. */
+export type RequestFingerprintSegment = 'config' | 'system' | 'tools' | 'messages'
+
+/** Redacted SHA-256 summaries of an assembled model request. */
+export interface RequestFingerprint {
+  readonly config: string
+  readonly system: string
+  readonly tools: string
+  readonly messages: string
+  readonly messageHashes: readonly string[]
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === undefined) return 'undefined'
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+/** Hash an assembled request without retaining prompt or message text. */
+export function fingerprintGenerateOptions(options: GenerateOptions): RequestFingerprint {
+  const config = {
+    provider: options.provider,
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    temperature: options.temperature,
+    maxTokens: options.maxTokens,
+    stop: options.stop,
+    purpose: options.purpose,
+  }
+  const messageHashes = options.messages.map(message => sha256(canonicalJson(message)))
+  return Object.freeze({
+    config: sha256(canonicalJson(config)),
+    system: sha256(canonicalJson(options.system)),
+    tools: sha256(canonicalJson(options.tools)),
+    messages: sha256(canonicalJson(options.messages)),
+    messageHashes: Object.freeze(messageHashes),
+  })
+}
+
+/** Return the earliest changed segment, or the first changed message ordinal. */
+export function firstFingerprintDifference(a: RequestFingerprint, b: RequestFingerprint): RequestFingerprintSegment | number | null {
+  if (a.config !== b.config) return 'config'
+  if (a.system !== b.system) return 'system'
+  if (a.tools !== b.tools) return 'tools'
+  for (let i = 0; i < Math.max(a.messageHashes.length, b.messageHashes.length); i++) if (a.messageHashes[i] !== b.messageHashes[i]) return i
+  return a.messages === b.messages ? null : 'messages'
 }
 
 /**

@@ -40,8 +40,8 @@ export * from './content.ts'
 export * from './message.ts'
 export * from './retry-policy.ts'
 export { BlockAssembler } from './assembler.ts'
-export { callConfigEquals, deepFreeze, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
-export type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
+export { callConfigEquals, deepFreeze, firstFingerprintDifference, fingerprintGenerateOptions, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
+export type { LlmCallConfig, LlmCallConfigAdapterDefaults, RequestFingerprint, RequestFingerprintSegment } from './call-config.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
